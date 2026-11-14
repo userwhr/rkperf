@@ -1,0 +1,5 @@
+bin/
+*.o
+*.log
+*.log.csv
+*.tgz
