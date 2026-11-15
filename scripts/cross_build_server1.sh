@@ -33,7 +33,7 @@ echo "== cross compile C++ (static) =="
     -static -std=c++17 -O2 \
     -Iinclude -I"$SPD" \
     -I"$SYS/usr/include" -I"$SYS/usr/include/aarch64-linux-gnu" \
-    src/rkperf.cpp bpf_blob.o \
+    src/rkperf.cpp src/rklog.cpp bpf_blob.o \
     -L"$SYS/usr/lib/gcc/aarch64-linux-gnu/11" \
     -L"$SYS/usr/lib/aarch64-linux-gnu" \
     -lbpf -lelf -lz -lpthread -lm \

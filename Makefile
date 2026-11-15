@@ -22,8 +22,8 @@ $(BLOB): $(BPFOBJ)
 	ld -r -b binary $< -o $@
 
 # 3) 用户态程序（需要 spdlog 头文件）
-$(TARGET): src/rkperf.cpp $(BLOB)
-	$(CXX) $(CXXFLAGS) -I$(SPDLOG_INC) src/rkperf.cpp $(BLOB) -o $@ $(LDFLAGS)
+$(TARGET): src/rkperf.cpp src/rklog.cpp $(BLOB)
+	$(CXX) $(CXXFLAGS) -I$(SPDLOG_INC) src/rkperf.cpp src/rklog.cpp $(BLOB) -o $@ $(LDFLAGS)
 
 clean:
 	rm -f $(TARGET) $(BPFOBJ) $(BLOB)
