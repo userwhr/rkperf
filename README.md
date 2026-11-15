@@ -21,34 +21,34 @@ scp rkperf rk:~/rkperf/
 ## 使用
 
 ```bash
-sudo ./rkperf run [-o rkperf.log] [-l /usr/lib/librknnrt.so] [-s rknn_run] -- <程序> [参数...]
+sudo rkperf <程序> [程序参数...]
 ```
-
-| 选项 | 说明 | 默认值 |
-|---|---|---|
-| `-o, --out` | 日志文件 | `rkperf.log` |
-| `-l, --lib` | librknnrt.so 路径 | `/usr/lib/librknnrt.so` |
-| `-s, --sym` | 探针符号 | `rknn_run` |
-| `-v, --verbose` | 输出 debug | 关 |
 
 例子：
 
 ```bash
-sudo ~/rkperf/rkperf run -o /tmp/run.log -- \
-     ~/yolo11_seg_demo/yolo11_seg_demo ~/yolo11n-seg-4out.rknn ~/bus.jpg /tmp/o.jpg
+sudo ~/rkperf/rkperf ~/yolo11_seg_demo/yolo11_seg_demo \
+     ~/yolo11n-seg-4out.rknn ~/bus.jpg /tmp/o.jpg
 ```
+
+固定的东西（不用传参）：
+
+| 项 | 值 |
+|---|---|
+| 目标库 | `/usr/lib/librknnrt.so` |
+| 探针符号 | `rknn_run` |
+| 日志 | `/tmp/rkperf.log` |
+| 数据 | `/tmp/rkperf.log.csv` |
 
 ## 输出
 
-会生成两个文件：
-
-**`run.log`** — 人类可读
+**`/tmp/rkperf.log`** — 人类可读
 
 ```
-[2026-11-13T21:09:17.297+08:00] [info] rknn_run pid=1234 tid=1234 ctx=0x7f8c SYNC  dur=41.802 ms ret=0 comm=yolo11_seg_demo
+[2026-11-15T16:29:57.055+08:00] [info] rknn_run pid=1234 tid=1234 ctx=0x7f8c SYNC  dur=41.802 ms ret=0 comm=yolo11_seg_demo
 ```
 
-**`run.log.csv`** — 数据行，可直接喂 pandas
+**`/tmp/rkperf.log.csv`** — 数据行，可直接喂 pandas
 
 ```
 # ts_in_ns,dur_ns,dur_ms,pid,tid,ctx,ret,non_block,comm
@@ -58,5 +58,5 @@ sudo ~/rkperf/rkperf run -o /tmp/run.log -- \
 ## 注意
 
 - 需要 **root**（加载 BPF 程序）
-- 只跟踪 fork 出来的子进程，暂不支持附加到已有进程
+- 只跟踪 fork 出来的子进程
 - 板子内核没开 `CONFIG_KPROBES`，只能挂用户态 uprobe

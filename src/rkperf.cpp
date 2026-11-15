@@ -1,13 +1,15 @@
-// rkperf.cpp —— 采集进程在 rknn_run 里的耗时（spdlog 异步日志版）
+// rkperf.cpp —— 采集进程在 rknn_run 里的耗时
 //
 // 用法:
-//   sudo rkperf run [-o rkperf.log] [-l /usr/lib/librknnrt.so] [-s rknn_run] -- <程序> [参数...]
+//   sudo rkperf <程序> [参数...]
 //
-// 设计要点（保证不影响被测数据）：
-//   1. 时间戳在 BPF（内核）侧采集，用户态日志再慢也改不了测量值
-//   2. spdlog async_logger：采集线程只做 snprintf + 入队，落盘由独立线程完成
-//   3. 队列满时 discard_new，绝不阻塞采集线程
-//   4. perf buffer 放大到 256KB，避免采集线程被日志拖慢后丢事件
+// 例:
+//   sudo ./rkperf ./yolo11_seg_demo yolo11n-seg.rknn bus.jpg out.jpg
+//
+// 说明:
+//   - 目标库固定为 /usr/lib/librknnrt.so，符号固定 rknn_run
+//   - 日志固定写到 /tmp/rkperf.log 和 /tmp/rkperf.log.csv
+//   - 时间戳在 BPF（内核）侧采集，用户态日志不影响测量值
 
 #define _GNU_SOURCE
 #include <cstdio>
@@ -16,7 +18,6 @@
 #include <cerrno>
 #include <unistd.h>
 #include <csignal>
-#include <getopt.h>
 #include <fcntl.h>
 #include <sys/wait.h>
 #include <sys/types.h>
@@ -33,13 +34,15 @@
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/sinks/rotating_file_sink.h>
 
-#define DEFAULT_LIB  "/usr/lib/librknnrt.so"
-#define DEFAULT_SYM  "rknn_run"
-#define DEFAULT_LOG  "rkperf.log"
+/* 固定参数 */
+#define LIB_PATH   "/usr/lib/librknnrt.so"
+#define SYM_NAME   "rknn_run"
+#define LOG_PATH   "/tmp/rkperf.log"
+#define CSV_PATH   "/tmp/rkperf.log.csv"
 
-#define PERF_PAGES   64        /* 64 * 4KB = 256KB */
-#define QUEUE_SIZE   8192
-#define LOG_MAX_SIZE (16 * 1024 * 1024)
+#define PERF_PAGES    64
+#define QUEUE_SIZE    8192
+#define LOG_MAX_SIZE  (16 * 1024 * 1024)
 #define LOG_MAX_FILES 3
 
 struct rk_event {
@@ -121,7 +124,7 @@ static void on_event(void *ctx, int cpu, void *data, __u32 size)
     const struct rk_event *e = (const struct rk_event *)data;
     double ms = e->dur_ns / 1000000.0;
 
-    /* 采集线程只做 snprintf + 入队；落盘在 spdlog 的异步线程里 */
+    /* 采集线程只做 snprintf + 入队，落盘在 spdlog 的异步线程 */
     char buf[256];
     int n = snprintf(buf, sizeof(buf), "%llu,%llu,%.3f,%u,%u,0x%llx,%d,%d,%s",
                      e->ts_in, e->dur_ns, ms, e->pid, e->tid, e->ctx,
@@ -140,61 +143,20 @@ static void on_lost(void *ctx, int cpu, unsigned long long cnt)
     g_log->warn("lost {} events on cpu {}", cnt, cpu);
 }
 
-static void usage(const char *prog)
-{
-    printf(
-        "Usage:\n"
-        "  %s run [options] -- <program> [args...]\n"
-        "\n"
-        "Options:\n"
-        "  -o, --out FILE   日志文件（默认 %s）\n"
-        "  -l, --lib PATH   librknnrt.so 路径（默认 %s）\n"
-        "  -s, --sym NAME   探针符号（默认 %s）\n"
-        "  -v, --verbose    输出 DEBUG 日志\n"
-        "  -h, --help       帮助\n",
-        prog, DEFAULT_LOG, DEFAULT_LIB, DEFAULT_SYM);
-}
-
 int main(int argc, char **argv)
 {
-    if (argc < 2) { usage(argv[0]); return 1; }
-    if (strcmp(argv[1], "run") != 0) { usage(argv[0]); return 1; }
-
-    const char *log_path = DEFAULT_LOG;
-    const char *lib_path = DEFAULT_LIB;
-    const char *sym = DEFAULT_SYM;
-    int verbose = 0;
-
-    static struct option opts[] = {
-        {"out",     required_argument, 0, 'o'},
-        {"lib",     required_argument, 0, 'l'},
-        {"sym",     required_argument, 0, 's'},
-        {"verbose", no_argument,       0, 'v'},
-        {"help",    no_argument,       0, 'h'},
-        {0, 0, 0, 0}
-    };
-
-    optind = 2;
-    int c;
-    while ((c = getopt_long(argc, argv, "o:l:s:vh", opts, nullptr)) != -1) {
-        switch (c) {
-        case 'o': log_path = optarg; break;
-        case 'l': lib_path = optarg; break;
-        case 's': sym = optarg; break;
-        case 'v': verbose = 1; break;
-        case 'h': usage(argv[0]); return 0;
-        default:  usage(argv[0]); return 1;
-        }
+    if (argc < 2) {
+        fprintf(stderr, "usage: %s <program> [args...]\n", argv[0]);
+        return 1;
     }
-    if (optind >= argc) { fprintf(stderr, "缺少目标程序\n"); usage(argv[0]); return 1; }
-    char **child_argv = &argv[optind];
+    char **child_argv = &argv[1];
 
     /* ---------- 日志：spdlog 异步 ---------- */
     try {
         spdlog::init_thread_pool(QUEUE_SIZE, 1);
 
         auto log_sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(
-            log_path, LOG_MAX_SIZE, LOG_MAX_FILES);
+            LOG_PATH, LOG_MAX_SIZE, LOG_MAX_FILES);
         auto err_sink = std::make_shared<spdlog::sinks::stderr_color_sink_mt>();
         err_sink->set_level(spdlog::level::warn);
         std::vector<spdlog::sink_ptr> sinks{log_sink, err_sink};
@@ -202,14 +164,12 @@ int main(int argc, char **argv)
         g_log = std::make_shared<spdlog::async_logger>(
             "rkperf", sinks.begin(), sinks.end(),
             spdlog::thread_pool(), spdlog::async_overflow_policy::discard_new);
-        g_log->set_level(verbose ? spdlog::level::debug : spdlog::level::info);
+        g_log->set_level(spdlog::level::info);
         g_log->set_pattern("[%Y-%m-%dT%H:%M:%S.%e%z] [%l] %v");
         g_log->flush_on(spdlog::level::warn);
 
-        /* CSV 单独一个文件，只写数据行 */
-        std::string csv_path = std::string(log_path) + ".csv";
         auto csv_sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(
-            csv_path, LOG_MAX_SIZE, LOG_MAX_FILES);
+            CSV_PATH, LOG_MAX_SIZE, LOG_MAX_FILES);
         g_csv = std::make_shared<spdlog::async_logger>(
             "csv", csv_sink, spdlog::thread_pool(),
             spdlog::async_overflow_policy::discard_new);
@@ -221,16 +181,16 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    g_log->info("rkperf start: lib={} sym={} log={}", lib_path, sym, log_path);
+    g_log->info("rkperf start: target={} lib={}", child_argv[0], LIB_PATH);
 
     /* 1. 符号偏移 */
     unsigned long long offset = 0;
-    if (elf_sym_offset(lib_path, sym, &offset) != 0) {
-        g_log->error("symbol {} not found in {}", sym, lib_path);
+    if (elf_sym_offset(LIB_PATH, SYM_NAME, &offset) != 0) {
+        g_log->error("symbol {} not found in {}", SYM_NAME, LIB_PATH);
         spdlog::shutdown();
         return 1;
     }
-    g_log->info("symbol {} -> file offset 0x{:x}", sym, offset);
+    g_log->info("symbol {} -> file offset 0x{:x}", SYM_NAME, offset);
 
     /* 2. 内嵌的 BPF 对象 */
     extern const unsigned char _binary_rkperf_bpf_o_start[];
@@ -239,7 +199,6 @@ int main(int argc, char **argv)
 
     struct bpf_object *obj = bpf_object__open_mem(_binary_rkperf_bpf_o_start, bpf_sz, nullptr);
     if (!obj) { g_log->error("open embedded bpf object failed: {}", strerror(errno)); return 1; }
-    g_log->info("embedded bpf object: {} bytes", bpf_sz);
 
     if (bpf_object__load(obj) != 0) {
         g_log->error("load bpf object failed（需要 root）");
@@ -263,17 +222,16 @@ int main(int argc, char **argv)
         fprintf(stderr, "execvp %s: %s\n", child_argv[0], strerror(errno));
         _exit(127);
     }
-    g_log->info("child pid={} cmd={}", child, child_argv[0]);
+    g_log->info("child pid={}", child);
 
     /* 4. attach uprobe */
-    struct bpf_link *link_enter = bpf_program__attach_uprobe(prog_enter, false, child, lib_path, offset);
-    struct bpf_link *link_exit  = bpf_program__attach_uprobe(prog_exit,  true,  child, lib_path, offset);
+    struct bpf_link *link_enter = bpf_program__attach_uprobe(prog_enter, false, child, LIB_PATH, offset);
+    struct bpf_link *link_exit  = bpf_program__attach_uprobe(prog_exit,  true,  child, LIB_PATH, offset);
     if (!link_enter || !link_exit) {
         g_log->error("attach uprobe failed: {}", strerror(errno));
         kill(child, SIGKILL);
         return 1;
     }
-    g_log->info("uprobe attached (pid={})", child);
 
     /* 5. perf buffer */
     struct perf_buffer_opts pb_opts = {
@@ -302,6 +260,7 @@ int main(int argc, char **argv)
     waitpid(child, &status, 0);
 
     g_log->info("child exited, status={}", WIFEXITED(status) ? WEXITSTATUS(status) : -1);
+    g_log->info("log: {}  csv: {}", LOG_PATH, CSV_PATH);
 
     perf_buffer__free(pb);
     bpf_link__destroy(link_enter);
