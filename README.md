@@ -45,7 +45,17 @@ sudo ~/rkperf/rkperf ~/yolo11_seg_demo/yolo11_seg_demo \
 **`/tmp/rkperf.log`** — 人类可读
 
 ```
-[2026-11-15T16:29:57.055+08:00] [info] rknn_run pid=1234 tid=1234 ctx=0x7f8c SYNC  dur=41.802 ms ret=0 comm=yolo11_seg_demo
+[2026-11-15T20:45:19.024+08:00] [info] rkperf start: target=./yolo11_seg_demo lib=/usr/lib/librknnrt.so
+[2026-11-15T20:45:19.025+08:00] [info] symbol rknn_run -> file offset 0xcc040
+[2026-11-15T20:45:19.100+08:00] [info] process start: pid=1234 at 2026-11-15T20:45:19.100+0800 cmd=./yolo11_seg_demo
+[2026-11-15T20:45:19.150+08:00] [info] rknn_run pid=1234 tid=1234 ctx=0x7f8c SYNC  dur=41.802 ms ret=0 comm=yolo11_seg_demo
+[2026-11-15T20:45:31.400+08:00] [info] process end: pid=1234 at 2026-11-15T20:45:31.400+0800 duration=12.300s reason=exited code=0
+```
+
+按 `Ctrl+C` 中断时，仍然会留下结束时间：
+
+```
+[2026-11-15T20:45:24.200+08:00] [info] process end: pid=1234 at 2026-11-15T20:45:24.200+0800 duration=5.120s reason=signal code=15 (interrupted)
 ```
 
 **`/tmp/rkperf.log.csv`** — 数据行，可直接喂 pandas

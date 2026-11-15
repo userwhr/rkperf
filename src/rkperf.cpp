@@ -16,6 +16,7 @@
 #include <cstring>
 #include <cerrno>
 #include <string>
+#include <ctime>
 #include <unistd.h>
 #include <csignal>
 #include <fcntl.h>
@@ -41,6 +42,31 @@
 
 static volatile sig_atomic_t g_stop = 0;
 static void on_signal(int sig) { (void)sig; g_stop = 1; }
+
+/* ---------------- 时间工具 ---------------- */
+
+/* 单调时钟，单位秒（用于算时长，不受系统时间调整影响） */
+static double mono_seconds()
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+}
+
+/* 墙上时间，ISO8601 带毫秒和时区（用于日志里记录时刻） */
+static std::string iso_now()
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    struct tm tm;
+    localtime_r(&ts.tv_sec, &tm);
+
+    char base[32], zone[8], out[64];
+    strftime(base, sizeof(base), "%Y-%m-%dT%H:%M:%S", &tm);
+    strftime(zone, sizeof(zone), "%z", &tm);
+    snprintf(out, sizeof(out), "%s.%03ld%s", base, ts.tv_nsec / 1000000L, zone);
+    return std::string(out);
+}
 
 /* ---------------- perf buffer 回调 ---------------- */
 
@@ -158,6 +184,12 @@ static int do_trace(char **child_argv)
     }
     rklog::info("child pid=" + std::to_string(child));
 
+    /* 记录进程开始时刻 */
+    const double t_start = mono_seconds();
+    const std::string t_start_iso = iso_now();
+    rklog::info("process start: pid=" + std::to_string(child) +
+                " at " + t_start_iso + " cmd=" + child_argv[0]);
+
     /* 4. attach uprobe（只挂子进程） */
     struct bpf_link *link_enter = bpf_program__attach_uprobe(prog_enter, false, child, LIB_PATH, offset);
     struct bpf_link *link_exit  = bpf_program__attach_uprobe(prog_exit,  true,  child, LIB_PATH, offset);
@@ -181,19 +213,48 @@ static int do_trace(char **child_argv)
 
     /* 6. 采集循环 */
     int status = 0;
+    bool child_done = false;
     while (!g_stop) {
         int err = perf_buffer__poll(pb, 100);
         if (err < 0 && err != -EINTR) { rklog::warn("poll: " + std::to_string(err)); break; }
         if (waitpid(child, &status, WNOHANG) == child) {
+            child_done = true;
             perf_buffer__poll(pb, 200);   /* 收完残余事件 */
             break;
         }
     }
-    if (g_stop) kill(child, SIGTERM);
-    waitpid(child, &status, 0);
 
-    rklog::info("child exited, status=" +
-                std::to_string(WIFEXITED(status) ? WEXITSTATUS(status) : -1));
+    /* 7. 收尾：先 SIGTERM，最多等 2 秒，还不走就 SIGKILL */
+    if (!child_done) {
+        kill(child, SIGTERM);
+        for (int i = 0; i < 20; i++) {
+            pid_t r = waitpid(child, &status, WNOHANG);
+            if (r == child) { child_done = true; break; }
+            if (r < 0 && errno == ECHILD) { child_done = true; break; }
+            usleep(100000);   /* 100 ms */
+        }
+        if (!child_done) {
+            kill(child, SIGKILL);
+            while (waitpid(child, &status, 0) < 0 && errno == EINTR) {}
+        }
+    }
+
+    /* 8. 结束时刻 + 总时长 */
+    const double t_end = mono_seconds();
+    const std::string t_end_iso = iso_now();
+    const double dur = t_end - t_start;
+
+    const char *reason = "unknown";
+    int code = -1;
+    if (WIFEXITED(status))        { reason = "exited"; code = WEXITSTATUS(status); }
+    else if (WIFSIGNALED(status)) { reason = "signal"; code = WTERMSIG(status); }
+
+    char summary[256];
+    snprintf(summary, sizeof(summary),
+             "process end: pid=%d at %s duration=%.3fs reason=%s code=%d%s",
+             (int)child, t_end_iso.c_str(), dur, reason, code,
+             g_stop ? " (interrupted)" : "");
+    rklog::info(summary);
 
     perf_buffer__free(pb);
     bpf_link__destroy(link_enter);
