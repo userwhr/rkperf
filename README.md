@@ -41,12 +41,20 @@ sudo ~/rkperf/rkperf python3 infer.py
 |---|---|
 | 探针符号 | `rknn_run` |
 | 目标库 | **自动发现**：系统路径 + Python 包里自带的副本，找到几个挂几个 |
-| 日志 | `/tmp/rkperf.log` |
-| 数据 | `/tmp/rkperf.log.csv` |
+| 输出目录 | `/tmp/rkperf_<时间戳>/`（每次运行新建） |
 
 ## 输出
 
-**`/tmp/rkperf.log`** — 人类可读
+每次运行会在 `/tmp` 下建一个带时间戳的目录，方便区分不同时间的测试：
+
+```
+/tmp/rkperf_20261116_193609/
+├── rkperf.log      人类可读日志
+├── events.csv      每次 rknn_run 的数据
+└── npu.csv         三个 NPU 核的使用率
+```
+
+**`rkperf.log`** — 人类可读
 
 ```
 [2026-11-15T20:45:19.024+08:00] [info] rkperf start: target=./yolo11_seg_demo lib=/usr/lib/librknnrt.so
@@ -62,7 +70,7 @@ sudo ~/rkperf/rkperf python3 infer.py
 [2026-11-15T20:45:24.200+08:00] [info] process end: pid=1234 at 2026-11-15T20:45:24.200+0800 duration=5.120s reason=signal code=15 (interrupted)
 ```
 
-**`/tmp/rkperf.log.csv`** — 数据行，可直接喂 pandas
+**`events.csv`** — 数据行，可直接喂 pandas
 
 ```
 # ts_in_ns,dur_ns,dur_ms,pid,tid,ctx,ret,non_block,core_mask,comm
@@ -71,7 +79,7 @@ sudo ~/rkperf/rkperf python3 infer.py
 
 `core_mask` 的取值：`0`=auto，`1`=core0，`2`=core1，`4`=core2，`7`=三核。
 
-**`/tmp/rkperf.npu.csv`** — 三核使用率，每秒一行
+**`npu.csv`** — 三核使用率，每秒一行
 
 ```
 # ts_ns,time,core0,core1,core2

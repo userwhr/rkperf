@@ -27,6 +27,7 @@
 #include <csignal>
 #include <fcntl.h>
 #include <glob.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <sys/types.h>
 
@@ -41,10 +42,8 @@
 #include "rklog.h"
 
 #define SYM_NAME   "rknn_run"
-#define LOG_PATH   "/tmp/rkperf.log"
-#define CSV_PATH   "/tmp/rkperf.log.csv"
-#define NPU_PATH   "/tmp/rkperf.npu.csv"
 #define NPU_LOAD   "/sys/kernel/debug/rknpu/load"
+#define OUT_ROOT   "/tmp"
 
 #define PERF_PAGES 64
 
@@ -80,8 +79,27 @@ static std::string iso_now()
     return std::string(out);
 }
 
-/* ---------------- NPU 使用率采样 ---------------- */
+/* ---------------- 输出目录 ---------------- */
 
+/* 创建 /tmp/rkperf_YYYYmmdd_HHMMSS，三次测试不会互相覆盖 */
+static std::string make_output_dir()
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    struct tm tm;
+    localtime_r(&ts.tv_sec, &tm);
+
+    char dir[80];
+    strftime(dir, sizeof(dir), OUT_ROOT "/rkperf_%Y%m%d_%H%M%S", &tm);
+
+    if (mkdir(dir, 0755) != 0 && errno != EEXIST) {
+        fprintf(stderr, "mkdir %s: %s\n", dir, strerror(errno));
+        return std::string();
+    }
+    return std::string(dir);
+}
+
+/* ---------------- NPU 使用率采样 ---------------- */
 static std::atomic<bool> g_npu_stop{false};
 
 /* 解析 "NPU load:  Core0: 45%, Core1:  0%, Core2:  0%," */
@@ -475,14 +493,20 @@ int main(int argc, char **argv)
         fprintf(stderr, "usage: %s <program> [args...]\n", argv[0]);
         return 1;
     }
-    if (!rklog::init(LOG_PATH, CSV_PATH, NPU_PATH))
+
+    std::string dir = make_output_dir();
+    if (dir.empty())
+        return 1;
+
+    if (!rklog::init(dir + "/rkperf.log", dir + "/events.csv", dir + "/npu.csv"))
         return 1;
 
     rklog::info(std::string("rkperf start: target=") + argv[1]);
+    rklog::info("output dir: " + dir);
 
     int rc = do_trace(&argv[1]);
 
-    rklog::info(std::string("log: " LOG_PATH "  csv: " CSV_PATH));
+    rklog::info("output: " + dir);
     rklog::flush();
     rklog::shutdown();
     return rc;
