@@ -43,6 +43,19 @@ sudo ~/rkperf/rkperf python3 infer.py
 | 目标库 | **自动发现**：系统路径 + Python 包里自带的副本，找到几个挂几个 |
 | 输出目录 | `/tmp/rkperf_<时间戳>/`（每次运行新建） |
 
+### 跑 Python SDK
+
+`rkperf` 需要 root，而 `pip install --user` 装的包在 `~/.local` 下；`sudo` 会重置 `HOME`，
+所以要显式把 `PYTHONPATH` 传进去：
+
+```bash
+sudo env HOME=/home/orangepi \
+         PYTHONPATH=/home/orangepi/.local/lib/python3.10/site-packages \
+         ~/rkperf/rkperf python3 examples/py_infer.py
+```
+
+或者把包装到系统里（`sudo pip install`），就不用管这个了。
+
 ## 输出
 
 每次运行会在 `/tmp` 下建一个带时间戳的目录，方便区分不同时间的测试：
