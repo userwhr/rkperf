@@ -7,7 +7,7 @@
 #include "rk_event.h"
 
 // 落盘模块：spdlog 异步日志
-//   - 人类可读日志   -> log_path
+//   - 可读日志   -> log_path
 //   - 采集事件 CSV   -> csv_path
 //   - NPU 使用率 CSV -> npu_path
 //   - DDR 带宽 CSV   -> ddr_path

@@ -15,7 +15,7 @@ constexpr size_t kQueueSize = 8192;
 constexpr size_t kMaxFileSize = 16 * 1024 * 1024;
 constexpr int    kMaxFiles = 3;
 
-std::shared_ptr<spdlog::logger> g_log;   // 人类可读
+std::shared_ptr<spdlog::logger> g_log;   // 可读日志
 std::shared_ptr<spdlog::logger> g_csv;   // 采集事件
 std::shared_ptr<spdlog::logger> g_npu;   // NPU 使用率
 std::shared_ptr<spdlog::logger> g_ddr;   // DDR 带宽

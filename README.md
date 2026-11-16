@@ -12,6 +12,8 @@ cd rkperf
 
 脚本自动判断架构：**aarch64 本机编译**，其他架构**交叉编译**。产物在 `build/rkperf`。
 
+> 交叉编译需要 **Linux 环境**（物理机、虚拟机、WSL2 或 Docker 都行）。Windows 原生环境跑不了 aarch64 交叉工具链。
+
 ### 依赖
 
 **板子上编译（aarch64）**
@@ -69,11 +71,10 @@ sudo rkperf <程序> [程序参数...]
 
 ```bash
 # C/C++ 程序
-sudo ~/rkperf/rkperf ~/yolo11_seg_demo/yolo11_seg_demo \
-     ~/yolo11n-seg-4out.rknn ~/bus.jpg /tmp/o.jpg
+sudo ~/rkperf/rkperf ./your_demo model.rknn input.jpg
 
 # Python SDK（rknn-toolkit-lite2 等）
-sudo ~/rkperf/rkperf python3 infer.py
+sudo ~/rkperf/rkperf python3 your_script.py
 ```
 
 固定的东西（不用传参）：
@@ -103,19 +104,19 @@ sudo env HOME=/home/orangepi \
 
 ```
 /tmp/rkperf_20261116_193609/
-├── rkperf.log      人类可读日志
+├── rkperf.log      可读日志
 ├── events.csv      每次 rknn_run 的数据
 ├── npu.csv         三个 NPU 核的使用率
 └── ddr.csv         DDR 带宽占用率
 ```
 
-**`rkperf.log`** — 人类可读
+**`rkperf.log`** — 可读日志
 
 ```
-[2026-11-15T20:45:19.024+08:00] [info] rkperf start: target=./yolo11_seg_demo lib=/usr/lib/librknnrt.so
+[2026-11-15T20:45:19.024+08:00] [info] rkperf start: target=./infer_demo lib=/usr/lib/librknnrt.so
 [2026-11-15T20:45:19.025+08:00] [info] symbol rknn_run -> file offset 0xcc040
-[2026-11-15T20:45:19.100+08:00] [info] process start: pid=1234 at 2026-11-15T20:45:19.100+0800 cmd=./yolo11_seg_demo
-[2026-11-15T20:45:19.150+08:00] [info] rknn_run pid=1234 tid=1234 ctx=0x7f8c SYNC  core=core0 dur=41.802 ms ret=0 comm=yolo11_seg_demo
+[2026-11-15T20:45:19.100+08:00] [info] process start: pid=1234 at 2026-11-15T20:45:19.100+0800 cmd=./infer_demo
+[2026-11-15T20:45:19.150+08:00] [info] rknn_run pid=1234 tid=1234 ctx=0x7f8c SYNC  core=core0 dur=41.802 ms ret=0 comm=infer_demo
 [2026-11-15T20:45:31.400+08:00] [info] process end: pid=1234 at 2026-11-15T20:45:31.400+0800 duration=12.300s reason=exited code=0
 ```
 
@@ -129,7 +130,7 @@ sudo env HOME=/home/orangepi \
 
 ```
 # ts_in_ns,dur_ns,dur_ms,pid,tid,ctx,ret,non_block,core_mask,comm
-1731490831123456789,41802000,41.802,1234,1234,0x7f8c,0,0,1,yolo11_seg_demo
+1731490831123456789,41802000,41.802,1234,1234,0x7f8c,0,0,1,infer_demo
 ```
 
 `core_mask` 的取值：`0`=auto，`1`=core0，`2`=core1，`4`=core2，`7`=三核。
