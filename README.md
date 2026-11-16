@@ -52,7 +52,7 @@ sudo ~/rkperf/rkperf python3 infer.py
 [2026-11-15T20:45:19.024+08:00] [info] rkperf start: target=./yolo11_seg_demo lib=/usr/lib/librknnrt.so
 [2026-11-15T20:45:19.025+08:00] [info] symbol rknn_run -> file offset 0xcc040
 [2026-11-15T20:45:19.100+08:00] [info] process start: pid=1234 at 2026-11-15T20:45:19.100+0800 cmd=./yolo11_seg_demo
-[2026-11-15T20:45:19.150+08:00] [info] rknn_run pid=1234 tid=1234 ctx=0x7f8c SYNC  dur=41.802 ms ret=0 comm=yolo11_seg_demo
+[2026-11-15T20:45:19.150+08:00] [info] rknn_run pid=1234 tid=1234 ctx=0x7f8c SYNC  core=core0 dur=41.802 ms ret=0 comm=yolo11_seg_demo
 [2026-11-15T20:45:31.400+08:00] [info] process end: pid=1234 at 2026-11-15T20:45:31.400+0800 duration=12.300s reason=exited code=0
 ```
 
@@ -65,9 +65,11 @@ sudo ~/rkperf/rkperf python3 infer.py
 **`/tmp/rkperf.log.csv`** — 数据行，可直接喂 pandas
 
 ```
-# ts_in_ns,dur_ns,dur_ms,pid,tid,ctx,ret,non_block,comm
-1731490831123456789,41802000,41.802,1234,1234,0x7f8c,0,0,yolo11_seg_demo
+# ts_in_ns,dur_ns,dur_ms,pid,tid,ctx,ret,non_block,core_mask,comm
+1731490831123456789,41802000,41.802,1234,1234,0x7f8c,0,0,1,yolo11_seg_demo
 ```
+
+`core_mask` 的取值：`0`=auto，`1`=core0，`2`=core1，`4`=core2，`7`=三核。
 
 ## 注意
 

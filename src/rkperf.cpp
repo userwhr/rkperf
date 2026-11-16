@@ -134,6 +134,24 @@ static std::vector<std::string> find_rknn_libs()
     return out;
 }
 
+/* 返回 libc 路径（用于挂 ioctl 探针） */
+static std::string find_libc()
+{
+    const char *cands[] = {
+        "/lib/aarch64-linux-gnu/libc.so.6",
+        "/usr/lib/aarch64-linux-gnu/libc.so.6",
+        "/lib64/libc.so.6",
+        "/lib/libc.so.6",
+    };
+    for (const char *c : cands)
+        if (access(c, R_OK) == 0) return std::string(c);
+
+    std::vector<std::string> v;
+    glob_add(v, "/lib/*/libc.so.6");
+    glob_add(v, "/usr/lib/*/libc.so.6");
+    return v.empty() ? std::string() : v[0];
+}
+
 /* ---------------- perf buffer 回调 ---------------- */
 
 static void on_event(void *ctx, int cpu, void *data, __u32 size)
@@ -267,8 +285,9 @@ static int do_trace(char **child_argv)
     rklog::info("process start: pid=" + std::to_string(child) +
                 " at " + t_start_iso + " cmd=" + child_argv[0]);
 
-    /* 4. 每个库都挂一对探针（只挂子进程） */
+    /* 4. 每个库都挂探针（只挂子进程） */
     std::vector<struct bpf_link *> links;
+    int attached = 0;
     for (const auto &t : targets) {
         struct bpf_link *le = bpf_program__attach_uprobe(prog_enter, false, child,
                                                          t.path.c_str(), t.offset);
@@ -282,14 +301,51 @@ static int do_trace(char **child_argv)
         }
         links.push_back(le);
         links.push_back(lx);
+        attached++;
+
+        /* 可选：rknn_set_core_mask，记录应用显式设置的核 */
+        unsigned long long off_cm = 0;
+        struct bpf_program *pcm = bpf_object__find_program_by_name(obj, "rknn_set_core_mask_enter");
+        if (pcm && elf_sym_offset(t.path.c_str(), "rknn_set_core_mask", &off_cm) == 0) {
+            struct bpf_link *lcm = bpf_program__attach_uprobe(pcm, false, child,
+                                                              t.path.c_str(), off_cm);
+            if (lcm)
+                links.push_back(lcm);
+        }
     }
-    if (links.empty()) {
+    if (attached == 0) {
         rklog::error("attach uprobe failed on all targets");
         kill(child, SIGKILL);
         waitpid(child, nullptr, 0);
         return 1;
     }
-    rklog::info("attached " + std::to_string(links.size() / 2) + " target(s)");
+
+    /* 4b. 挂 libc 的 ioctl 探针，用来抓驱动回写的 core_mask */
+    std::string libc = find_libc();
+    if (!libc.empty()) {
+        unsigned long long off = 0;
+        struct bpf_program *pin  = bpf_object__find_program_by_name(obj, "ioctl_enter");
+        struct bpf_program *pout = bpf_object__find_program_by_name(obj, "ioctl_exit");
+        if (pin && pout && elf_sym_offset(libc.c_str(), "ioctl", &off) == 0) {
+            struct bpf_link *a = bpf_program__attach_uprobe(pin,  false, child, libc.c_str(), off);
+            struct bpf_link *b = bpf_program__attach_uprobe(pout, true,  child, libc.c_str(), off);
+            if (a && b) {
+                links.push_back(a);
+                links.push_back(b);
+                rklog::info("ioctl probe: " + libc + " @" + hex_u64(off));
+            } else {
+                if (a) bpf_link__destroy(a);
+                if (b) bpf_link__destroy(b);
+                rklog::warn("ioctl probe attach failed, core_mask will be unknown");
+            }
+        } else {
+            rklog::warn("ioctl symbol not found in " + libc);
+        }
+    } else {
+        rklog::warn("libc not found, core_mask will be unknown");
+    }
+
+    rklog::info("attached " + std::to_string(attached) + " target(s)");
 
     /* 5. perf buffer */
     struct perf_buffer_opts pb_opts = {
