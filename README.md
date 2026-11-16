@@ -4,18 +4,59 @@
 
 ## 编译
 
-在 x86_64 Linux 上交叉编译，产出静态 ELF：
+```bash
+git clone https://github.com/userwhr/rkperf.git
+cd rkperf
+./scripts/build.sh
+```
+
+脚本自动判断架构：**aarch64 本机编译**，其他架构**交叉编译**。产物在 `build/rkperf`。
+
+### 依赖
+
+**板子上编译（aarch64）**
 
 ```bash
-bash scripts/cross_build_server1.sh
+sudo apt install clang g++ make libbpf-dev libelf-dev zlib1g-dev curl
 ```
+
+**x86_64 交叉编译**
+
+需要两样东西：交叉工具链 + 板子的 sysroot。
+
+```bash
+# 1) 工具链
+sudo apt install g++-aarch64-linux-gnu
+#   或者用 Arm 官方工具链，然后 CROSS_PREFIX=aarch64-none-linux-gnu-
+
+# 2) sysroot：在板子上打包，再拷到编译机
+#    板子上：
+./scripts/build.sh --make-sysroot        # 生成 sysroot.tgz（约 120 MB）
+#    编译机上：
+scp board:~/rkperf/sysroot.tgz .
+mkdir -p ~/aarch64-sysroot
+tar xzf sysroot.tgz -C ~/aarch64-sysroot
+
+# 3) 编译
+./scripts/build.sh --cross
+```
+
+自定义路径：
+
+```bash
+SYSROOT=/opt/rk3588-sysroot CROSS_PREFIX=aarch64-none-linux-gnu- ./scripts/build.sh --cross
+```
+
+完整依赖说明：`./scripts/build.sh --deps`
+
+> spdlog 会自动下载到 `build/`，不需要提前安装。
 
 ## 部署
 
 板子上只需要一个文件：
 
 ```bash
-scp rkperf rk:~/rkperf/
+scp build/rkperf rk:~/rkperf/
 ```
 
 ## 使用
