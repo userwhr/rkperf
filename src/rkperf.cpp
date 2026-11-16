@@ -43,6 +43,7 @@
 
 #define SYM_NAME   "rknn_run"
 #define NPU_LOAD   "/sys/kernel/debug/rknpu/load"
+#define DDR_LOAD   "/sys/class/devfreq/dmc/load"
 #define OUT_ROOT   "/tmp"
 
 #define PERF_PAGES 64
@@ -142,6 +143,53 @@ static void npu_sampler()
         }
         for (int i = 0; i < 10 && !g_npu_stop.load(); i++)
             usleep(100000);
+    }
+}
+
+/* ---------------- DDR 带宽采样 ---------------- */
+
+static std::atomic<bool> g_ddr_stop{false};
+
+/* /sys/class/devfreq/dmc/load 的格式: "12@528000000Hz" */
+static bool read_ddr_load(int *pct, unsigned long long *hz)
+{
+    FILE *f = fopen(DDR_LOAD, "r");
+    if (!f) return false;
+    char buf[64] = {0};
+    bool ok = fgets(buf, sizeof(buf), f) != nullptr;
+    fclose(f);
+    if (!ok) return false;
+    return sscanf(buf, "%d@%lluHz", pct, hz) == 2;
+}
+
+/* 每 100ms 采一次；频率变化时往主日志里记一条 */
+static void ddr_sampler()
+{
+    bool warned = false;
+    unsigned long long last_hz = 0;
+
+    while (!g_ddr_stop.load()) {
+        int pct = 0;
+        unsigned long long hz = 0;
+        if (!read_ddr_load(&pct, &hz)) {
+            if (!warned) {
+                rklog::warn(std::string("ddr sampler: 打不开 ") + DDR_LOAD + "，跳过");
+                warned = true;
+            }
+        } else {
+            rklog::write_ddr((uint64_t)(mono_seconds() * 1e9), iso_now().c_str(), pct, hz);
+
+            if (last_hz && hz != last_hz) {
+                char msg[128];
+                snprintf(msg, sizeof(msg), "ddr freq: %llu MHz -> %llu MHz (%s)",
+                         last_hz / 1000000ULL, hz / 1000000ULL,
+                         hz > last_hz ? "up" : "down");
+                rklog::info(msg);
+            }
+            last_hz = hz;
+        }
+        for (int i = 0; i < 10 && !g_ddr_stop.load(); i++)
+            usleep(10000);   /* 10 × 10ms = 100ms */
     }
 }
 
@@ -432,8 +480,9 @@ static int do_trace(char **child_argv)
     rklog::info("process start: pid=" + std::to_string(child) +
                 " at " + t_start_iso + " cmd=" + child_argv[0]);
 
-    /* 启动 NPU 使用率采样 */
+    /* 启动 NPU / DDR 采样 */
     std::thread npu_thread(npu_sampler);
+    std::thread ddr_thread(ddr_sampler);
 
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
@@ -485,8 +534,11 @@ static int do_trace(char **child_argv)
 
     /* 停止采样线程 */
     g_npu_stop = true;
+    g_ddr_stop = true;
     if (npu_thread.joinable())
         npu_thread.join();
+    if (ddr_thread.joinable())
+        ddr_thread.join();
 
     perf_buffer__free(pb);
     for (auto *l : links) bpf_link__destroy(l);
@@ -505,7 +557,8 @@ int main(int argc, char **argv)
     if (dir.empty())
         return 1;
 
-    if (!rklog::init(dir + "/rkperf.log", dir + "/events.csv", dir + "/npu.csv"))
+    if (!rklog::init(dir + "/rkperf.log", dir + "/events.csv",
+                     dir + "/npu.csv", dir + "/ddr.csv"))
         return 1;
 
     rklog::info(std::string("rkperf start: target=") + argv[1]);

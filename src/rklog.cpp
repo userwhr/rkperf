@@ -18,6 +18,19 @@ constexpr int    kMaxFiles = 3;
 std::shared_ptr<spdlog::logger> g_log;   // 人类可读
 std::shared_ptr<spdlog::logger> g_csv;   // 采集事件
 std::shared_ptr<spdlog::logger> g_npu;   // NPU 使用率
+std::shared_ptr<spdlog::logger> g_ddr;   // DDR 带宽
+
+std::shared_ptr<spdlog::logger> make_csv(const std::string &name, const std::string &path)
+{
+    auto sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(
+        path, kMaxFileSize, kMaxFiles);
+    auto logger = std::make_shared<spdlog::async_logger>(
+        name, sink, spdlog::thread_pool(),
+        spdlog::async_overflow_policy::discard_new);
+    logger->set_level(spdlog::level::info);
+    logger->set_pattern("%v");
+    return logger;
+}
 
 }  // namespace
 
@@ -25,7 +38,8 @@ namespace rklog {
 
 bool init(const std::string &log_path,
           const std::string &csv_path,
-          const std::string &npu_path)
+          const std::string &npu_path,
+          const std::string &ddr_path)
 {
     try {
         spdlog::init_thread_pool(kQueueSize, 1);
@@ -43,23 +57,14 @@ bool init(const std::string &log_path,
         g_log->set_pattern("[%Y-%m-%dT%H:%M:%S.%e%z] [%l] %v");
         g_log->flush_on(spdlog::level::warn);
 
-        auto csv_sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(
-            csv_path, kMaxFileSize, kMaxFiles);
-        g_csv = std::make_shared<spdlog::async_logger>(
-            "csv", csv_sink, spdlog::thread_pool(),
-            spdlog::async_overflow_policy::discard_new);
-        g_csv->set_level(spdlog::level::info);
-        g_csv->set_pattern("%v");
+        g_csv = make_csv("csv", csv_path);
         g_csv->info("# ts_in_ns,dur_ns,dur_ms,pid,tid,ctx,ret,non_block,core_mask,comm");
 
-        auto npu_sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(
-            npu_path, kMaxFileSize, kMaxFiles);
-        g_npu = std::make_shared<spdlog::async_logger>(
-            "npu", npu_sink, spdlog::thread_pool(),
-            spdlog::async_overflow_policy::discard_new);
-        g_npu->set_level(spdlog::level::info);
-        g_npu->set_pattern("%v");
+        g_npu = make_csv("npu", npu_path);
         g_npu->info("# ts_ns,time,core0,core1,core2");
+
+        g_ddr = make_csv("ddr", ddr_path);
+        g_ddr->info("# ts_ns,time,load_pct,freq_hz");
         return true;
     } catch (const spdlog::spdlog_ex &ex) {
         fprintf(stderr, "spdlog init failed: %s\n", ex.what());
@@ -95,6 +100,15 @@ void write_npu(uint64_t ts_ns, const char *iso, int c0, int c1, int c2)
         g_npu->log(spdlog::level::info, spdlog::string_view_t(buf, (size_t)n));
 }
 
+void write_ddr(uint64_t ts_ns, const char *iso, int load_pct, unsigned long long freq_hz)
+{
+    char buf[160];
+    int n = snprintf(buf, sizeof(buf), "%llu,%s,%d,%llu",
+                     (unsigned long long)ts_ns, iso, load_pct, freq_hz);
+    if (n > 0)
+        g_ddr->log(spdlog::level::info, spdlog::string_view_t(buf, (size_t)n));
+}
+
 void info(const std::string &msg)  { if (g_log) g_log->info(msg); }
 void warn(const std::string &msg)  { if (g_log) g_log->warn(msg); }
 void error(const std::string &msg) { if (g_log) g_log->error(msg); }
@@ -104,6 +118,7 @@ void flush()
     if (g_log) g_log->flush();
     if (g_csv) g_csv->flush();
     if (g_npu) g_npu->flush();
+    if (g_ddr) g_ddr->flush();
 }
 
 void shutdown() { spdlog::shutdown(); }

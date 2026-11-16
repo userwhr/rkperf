@@ -64,7 +64,8 @@ sudo env HOME=/home/orangepi \
 /tmp/rkperf_20261116_193609/
 ├── rkperf.log      人类可读日志
 ├── events.csv      每次 rknn_run 的数据
-└── npu.csv         三个 NPU 核的使用率
+├── npu.csv         三个 NPU 核的使用率
+└── ddr.csv         DDR 带宽占用率
 ```
 
 **`rkperf.log`** — 人类可读
@@ -101,6 +102,22 @@ sudo env HOME=/home/orangepi \
 ```
 
 数据来自 `/sys/kernel/debug/rknpu/load`，驱动的统计窗口是 **1 秒**，所以采样也是 1 Hz。
+
+**`ddr.csv`** — DDR 带宽占用率，每 100 ms 一行
+
+```
+# ts_ns,time,load_pct,freq_hz
+26460869979302,2026-11-16T21:24:28.321+0800,35,528000000
+26461185884344,2026-11-16T21:24:28.637+0800,46,2112000000
+```
+
+数据来自 `/sys/class/devfreq/dmc/load`（格式 `46@2112000000Hz`），底层是 DDR 控制器的硬件计数器。
+DMC 频率变化时会额外在主日志里记一条：
+
+```
+[info] ddr freq: 528 MHz -> 2112 MHz (up)
+[info] ddr freq: 2112 MHz -> 528 MHz (down)
+```
 
 ## 注意
 
