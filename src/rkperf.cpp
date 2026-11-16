@@ -13,7 +13,9 @@
 // 落盘逻辑在 rklog.cpp，这里只负责：找库 -> 解析符号 -> 加载 BPF ->
 // 拉起进程 -> 挂探针 -> 收事件。
 
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
+#endif
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
