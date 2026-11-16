@@ -71,6 +71,16 @@ sudo ~/rkperf/rkperf python3 infer.py
 
 `core_mask` 的取值：`0`=auto，`1`=core0，`2`=core1，`4`=core2，`7`=三核。
 
+**`/tmp/rkperf.npu.csv`** — 三核使用率，每秒一行
+
+```
+# ts_ns,time,core0,core1,core2
+1731490831123456789,2026-11-15T20:45:20.100+0800,45,0,0
+1731490831124456789,2026-11-15T20:45:21.100+0800,38,0,0
+```
+
+数据来自 `/sys/kernel/debug/rknpu/load`，驱动的统计窗口是 **1 秒**，所以采样也是 1 Hz。
+
 ## 注意
 
 - 需要 **root**（加载 BPF 程序）

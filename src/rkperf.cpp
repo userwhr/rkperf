@@ -21,6 +21,8 @@
 #include <string>
 #include <vector>
 #include <ctime>
+#include <thread>
+#include <atomic>
 #include <unistd.h>
 #include <csignal>
 #include <fcntl.h>
@@ -41,6 +43,8 @@
 #define SYM_NAME   "rknn_run"
 #define LOG_PATH   "/tmp/rkperf.log"
 #define CSV_PATH   "/tmp/rkperf.log.csv"
+#define NPU_PATH   "/tmp/rkperf.npu.csv"
+#define NPU_LOAD   "/sys/kernel/debug/rknpu/load"
 
 #define PERF_PAGES 64
 
@@ -74,6 +78,53 @@ static std::string iso_now()
     strftime(zone, sizeof(zone), "%z", &tm);
     snprintf(out, sizeof(out), "%s.%03ld%s", base, ts.tv_nsec / 1000000L, zone);
     return std::string(out);
+}
+
+/* ---------------- NPU 使用率采样 ---------------- */
+
+static std::atomic<bool> g_npu_stop{false};
+
+/* 解析 "NPU load:  Core0: 45%, Core1:  0%, Core2:  0%," */
+static bool parse_npu_load(const char *buf, int v[3])
+{
+    const char *p = buf;
+    for (int i = 0; i < 3; i++) {
+        char key[16];
+        snprintf(key, sizeof(key), "Core%d:", i);
+        const char *q = strstr(p, key);
+        if (!q) return false;
+        q += strlen(key);
+        v[i] = atoi(q);
+        p = q;
+    }
+    return true;
+}
+
+/* 每秒读一次 /sys/kernel/debug/rknpu/load（驱动统计窗口就是 1 秒） */
+static void npu_sampler()
+{
+    bool warned = false;
+    while (!g_npu_stop.load()) {
+        FILE *f = fopen(NPU_LOAD, "r");
+        if (!f) {
+            if (!warned) {
+                rklog::warn(std::string("npu sampler: 打不开 ") + NPU_LOAD +
+                            " (" + strerror(errno) + ")，需要 root");
+                warned = true;
+            }
+        } else {
+            char buf[256] = {0};
+            if (fgets(buf, sizeof(buf), f)) {
+                int v[3];
+                if (parse_npu_load(buf, v))
+                    rklog::write_npu((uint64_t)(mono_seconds() * 1e9),
+                                     iso_now().c_str(), v[0], v[1], v[2]);
+            }
+            fclose(f);
+        }
+        for (int i = 0; i < 10 && !g_npu_stop.load(); i++)
+            usleep(100000);
+    }
 }
 
 /* ---------------- 找 librknnrt.so ---------------- */
@@ -347,6 +398,9 @@ static int do_trace(char **child_argv)
 
     rklog::info("attached " + std::to_string(attached) + " target(s)");
 
+    /* 启动 NPU 使用率采样 */
+    std::thread npu_thread(npu_sampler);
+
     /* 5. perf buffer */
     struct perf_buffer_opts pb_opts = {
         .sample_cb = on_event,
@@ -404,6 +458,11 @@ static int do_trace(char **child_argv)
              g_stop ? " (interrupted)" : "");
     rklog::info(summary);
 
+    /* 停止采样线程 */
+    g_npu_stop = true;
+    if (npu_thread.joinable())
+        npu_thread.join();
+
     perf_buffer__free(pb);
     for (auto *l : links) bpf_link__destroy(l);
     bpf_object__close(obj);
@@ -416,7 +475,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "usage: %s <program> [args...]\n", argv[0]);
         return 1;
     }
-    if (!rklog::init(LOG_PATH, CSV_PATH))
+    if (!rklog::init(LOG_PATH, CSV_PATH, NPU_PATH))
         return 1;
 
     rklog::info(std::string("rkperf start: target=") + argv[1]);

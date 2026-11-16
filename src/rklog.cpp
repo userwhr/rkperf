@@ -16,13 +16,16 @@ constexpr size_t kMaxFileSize = 16 * 1024 * 1024;
 constexpr int    kMaxFiles = 3;
 
 std::shared_ptr<spdlog::logger> g_log;   // 人类可读
-std::shared_ptr<spdlog::logger> g_csv;   // CSV 数据行
+std::shared_ptr<spdlog::logger> g_csv;   // 采集事件
+std::shared_ptr<spdlog::logger> g_npu;   // NPU 使用率
 
 }  // namespace
 
 namespace rklog {
 
-bool init(const std::string &log_path, const std::string &csv_path)
+bool init(const std::string &log_path,
+          const std::string &csv_path,
+          const std::string &npu_path)
 {
     try {
         spdlog::init_thread_pool(kQueueSize, 1);
@@ -48,6 +51,15 @@ bool init(const std::string &log_path, const std::string &csv_path)
         g_csv->set_level(spdlog::level::info);
         g_csv->set_pattern("%v");
         g_csv->info("# ts_in_ns,dur_ns,dur_ms,pid,tid,ctx,ret,non_block,core_mask,comm");
+
+        auto npu_sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(
+            npu_path, kMaxFileSize, kMaxFiles);
+        g_npu = std::make_shared<spdlog::async_logger>(
+            "npu", npu_sink, spdlog::thread_pool(),
+            spdlog::async_overflow_policy::discard_new);
+        g_npu->set_level(spdlog::level::info);
+        g_npu->set_pattern("%v");
+        g_npu->info("# ts_ns,time,core0,core1,core2");
         return true;
     } catch (const spdlog::spdlog_ex &ex) {
         fprintf(stderr, "spdlog init failed: %s\n", ex.what());
@@ -74,6 +86,15 @@ void write_event(const rk_event &e)
                 core_mask_name(e.core_mask), e.dur_ns / 1000000.0, e.ret, e.comm);
 }
 
+void write_npu(uint64_t ts_ns, const char *iso, int c0, int c1, int c2)
+{
+    char buf[160];
+    int n = snprintf(buf, sizeof(buf), "%llu,%s,%d,%d,%d",
+                     (unsigned long long)ts_ns, iso, c0, c1, c2);
+    if (n > 0)
+        g_npu->log(spdlog::level::info, spdlog::string_view_t(buf, (size_t)n));
+}
+
 void info(const std::string &msg)  { if (g_log) g_log->info(msg); }
 void warn(const std::string &msg)  { if (g_log) g_log->warn(msg); }
 void error(const std::string &msg) { if (g_log) g_log->error(msg); }
@@ -82,6 +103,7 @@ void flush()
 {
     if (g_log) g_log->flush();
     if (g_csv) g_csv->flush();
+    if (g_npu) g_npu->flush();
 }
 
 void shutdown() { spdlog::shutdown(); }
