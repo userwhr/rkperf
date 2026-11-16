@@ -339,22 +339,31 @@ static int do_trace(char **child_argv)
         return 1;
     }
 
-    /* 3. fork + exec */
+    /* 3. perf buffer —— 必须在 attach 之前建好，否则早期事件会丢 */
+    struct perf_buffer_opts pb_opts = {
+        .sample_cb = on_event,
+        .lost_cb   = on_lost,
+        .ctx       = nullptr,
+    };
+    struct perf_buffer *pb = perf_buffer__new(bpf_map__fd(map_events), PERF_PAGES, &pb_opts);
+    if (!pb) { rklog::error("perf_buffer__new failed"); return 1; }
+
+    /* 4. fork + exec：子进程先停住，等探针挂好再放行 */
     pid_t child = fork();
     if (child < 0) { rklog::error("fork: " + std::string(strerror(errno))); return 1; }
     if (child == 0) {
         setpgid(0, 0);
+        raise(SIGSTOP);            /* 等父进程 attach 完 */
         execvp(child_argv[0], child_argv);
         fprintf(stderr, "execvp %s: %s\n", child_argv[0], strerror(errno));
         _exit(127);
     }
+    {
+        int st = 0;
+        waitpid(child, &st, WUNTRACED);   /* 等子进程真正停下来 */
+    }
 
-    const double t_start = mono_seconds();
-    const std::string t_start_iso = iso_now();
-    rklog::info("process start: pid=" + std::to_string(child) +
-                " at " + t_start_iso + " cmd=" + child_argv[0]);
-
-    /* 4. 每个库都挂探针（只挂子进程） */
+    /* 5. 每个库都挂探针（只挂子进程） */
     std::vector<struct bpf_link *> links;
     int attached = 0;
     for (const auto &t : targets) {
@@ -416,17 +425,15 @@ static int do_trace(char **child_argv)
 
     rklog::info("attached " + std::to_string(attached) + " target(s)");
 
+    /* 6. 放行子进程，开始计时 */
+    kill(child, SIGCONT);
+    const double t_start = mono_seconds();
+    const std::string t_start_iso = iso_now();
+    rklog::info("process start: pid=" + std::to_string(child) +
+                " at " + t_start_iso + " cmd=" + child_argv[0]);
+
     /* 启动 NPU 使用率采样 */
     std::thread npu_thread(npu_sampler);
-
-    /* 5. perf buffer */
-    struct perf_buffer_opts pb_opts = {
-        .sample_cb = on_event,
-        .lost_cb   = on_lost,
-        .ctx       = nullptr,
-    };
-    struct perf_buffer *pb = perf_buffer__new(bpf_map__fd(map_events), PERF_PAGES, &pb_opts);
-    if (!pb) { rklog::error("perf_buffer__new failed"); return 1; }
 
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
