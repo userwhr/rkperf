@@ -2,13 +2,16 @@
 //
 // 用法:
 //   sudo rkperf <程序> [参数...]
+//   sudo rkperf python3 infer.py            # Python SDK 也可以
 //
-// 固定的东西:
-//   目标库 /usr/lib/librknnrt.so，符号 rknn_run
-//   日志   /tmp/rkperf.log 和 /tmp/rkperf.log.csv
+// 目标库自动发现（不写死路径）:
+//   /usr/lib/librknnrt.so 等系统路径
+//   Python 包里自带的副本（rknn/runtime/Linux/librknn_api/*/librknnrt.so）
+// 找到几个挂几个，目标进程加载哪个就命中哪个。
 //
-// 落盘逻辑在 rklog.cpp，这里只负责：解析符号 -> 加载 BPF -> 拉起进程 ->
-// 挂探针 -> 收事件。
+// 日志固定写 /tmp/rkperf.log 和 /tmp/rkperf.log.csv
+// 落盘逻辑在 rklog.cpp，这里只负责：找库 -> 解析符号 -> 加载 BPF ->
+// 拉起进程 -> 挂探针 -> 收事件。
 
 #define _GNU_SOURCE
 #include <cstdio>
@@ -16,10 +19,12 @@
 #include <cstring>
 #include <cerrno>
 #include <string>
+#include <vector>
 #include <ctime>
 #include <unistd.h>
 #include <csignal>
 #include <fcntl.h>
+#include <glob.h>
 #include <sys/wait.h>
 #include <sys/types.h>
 
@@ -33,19 +38,23 @@
 #include "rk_event.h"
 #include "rklog.h"
 
-#define LIB_PATH   "/usr/lib/librknnrt.so"
 #define SYM_NAME   "rknn_run"
 #define LOG_PATH   "/tmp/rkperf.log"
 #define CSV_PATH   "/tmp/rkperf.log.csv"
 
 #define PERF_PAGES 64
 
+/* 一个待挂载的目标库 */
+struct probe_target {
+    std::string path;
+    unsigned long long offset = 0;
+};
+
 static volatile sig_atomic_t g_stop = 0;
 static void on_signal(int sig) { (void)sig; g_stop = 1; }
 
 /* ---------------- 时间工具 ---------------- */
 
-/* 单调时钟，单位秒（用于算时长，不受系统时间调整影响） */
 static double mono_seconds()
 {
     struct timespec ts;
@@ -53,7 +62,6 @@ static double mono_seconds()
     return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
 }
 
-/* 墙上时间，ISO8601 带毫秒和时区（用于日志里记录时刻） */
 static std::string iso_now()
 {
     struct timespec ts;
@@ -66,6 +74,64 @@ static std::string iso_now()
     strftime(zone, sizeof(zone), "%z", &tm);
     snprintf(out, sizeof(out), "%s.%03ld%s", base, ts.tv_nsec / 1000000L, zone);
     return std::string(out);
+}
+
+/* ---------------- 找 librknnrt.so ---------------- */
+
+static void add_unique(std::vector<std::string> &v, const std::string &p)
+{
+    if (p.empty()) return;
+    if (access(p.c_str(), R_OK) != 0) return;
+    for (const auto &x : v)
+        if (x == p) return;
+    v.push_back(p);
+}
+
+static void glob_add(std::vector<std::string> &v, const std::string &pattern)
+{
+    glob_t g;
+    if (glob(pattern.c_str(), GLOB_NOSORT, nullptr, &g) == 0) {
+        for (size_t i = 0; i < g.gl_pathc; i++)
+            add_unique(v, g.gl_pathv[i]);
+    }
+    globfree(&g);
+}
+
+/* 返回系统里所有可能的 librknnrt.so */
+static std::vector<std::string> find_rknn_libs()
+{
+    std::vector<std::string> out;
+
+    /* 系统路径 */
+    add_unique(out, "/usr/lib/librknnrt.so");
+    add_unique(out, "/usr/local/lib/librknnrt.so");
+    add_unique(out, "/usr/lib/aarch64-linux-gnu/librknnrt.so");
+
+    /* Python 包里自带的副本（rknn-toolkit-lite2 等） */
+    glob_add(out, "/usr/local/lib/python3.*/dist-packages/rknn/runtime/Linux/librknn_api/*/librknnrt.so");
+    glob_add(out, "/usr/lib/python3/dist-packages/rknn/runtime/Linux/librknn_api/*/librknnrt.so");
+    glob_add(out, "/usr/local/lib/python3.*/site-packages/rknn/runtime/Linux/librknn_api/*/librknnrt.so");
+    glob_add(out, "/root/.local/lib/python3.*/site-packages/rknn/runtime/Linux/librknn_api/*/librknnrt.so");
+    glob_add(out, "/home/*/.local/lib/python3.*/site-packages/rknn/runtime/Linux/librknn_api/*/librknnrt.so");
+    glob_add(out, "/opt/*/lib/python3.*/site-packages/rknn/runtime/Linux/librknn_api/*/librknnrt.so");
+
+    /* 虚拟环境 */
+    const char *venv = getenv("VIRTUAL_ENV");
+    if (venv && *venv)
+        glob_add(out, std::string(venv) +
+                      "/lib/python3.*/site-packages/rknn/runtime/Linux/librknn_api/*/librknnrt.so");
+
+    /* 常见的解压版 SDK / 工具目录（如 ~/rk-tools/rknn-sdk/lib/） */
+    glob_add(out, "/home/*/*/lib/librknnrt.so");
+    glob_add(out, "/home/*/*/*/lib/librknnrt.so");
+    glob_add(out, "/root/*/lib/librknnrt.so");
+    glob_add(out, "/root/*/*/lib/librknnrt.so");
+    glob_add(out, "/opt/*/lib/librknnrt.so");
+    glob_add(out, "/opt/*/*/lib/librknnrt.so");
+    glob_add(out, "/usr/local/*/lib/librknnrt.so");
+    glob_add(out, "/usr/local/*/*/lib/librknnrt.so");
+
+    return out;
 }
 
 /* ---------------- perf buffer 回调 ---------------- */
@@ -88,7 +154,7 @@ static void on_lost(void *ctx, int cpu, unsigned long long cnt)
 static int elf_sym_offset(const char *path, const char *sym, unsigned long long *out)
 {
     int fd = open(path, O_RDONLY);
-    if (fd < 0) { rklog::error("open " + std::string(path) + ": " + strerror(errno)); return -1; }
+    if (fd < 0) return -1;
 
     if (elf_version(EV_CURRENT) == EV_NONE) { close(fd); return -1; }
     Elf *elf = elf_begin(fd, ELF_C_READ, nullptr);
@@ -138,19 +204,32 @@ static int elf_sym_offset(const char *path, const char *sym, unsigned long long 
     return -1;
 }
 
+static std::string hex_u64(unsigned long long v)
+{
+    char buf[32];
+    snprintf(buf, sizeof(buf), "0x%llx", v);
+    return std::string(buf);
+}
+
 /* ---------------- 主流程 ---------------- */
 
 static int do_trace(char **child_argv)
 {
-    /* 1. 符号偏移 */
-    unsigned long long offset = 0;
-    if (elf_sym_offset(LIB_PATH, SYM_NAME, &offset) != 0) {
-        rklog::error("symbol " SYM_NAME " not found in " LIB_PATH);
+    /* 1. 找所有 librknnrt.so 并解析符号偏移 */
+    std::vector<probe_target> targets;
+    for (const auto &lib : find_rknn_libs()) {
+        unsigned long long off = 0;
+        if (elf_sym_offset(lib.c_str(), SYM_NAME, &off) != 0) {
+            rklog::warn("skip " + lib + " (no " SYM_NAME ")");
+            continue;
+        }
+        targets.push_back({lib, off});
+        rklog::info("target: " + lib + " @" + hex_u64(off));
+    }
+    if (targets.empty()) {
+        rklog::error("no librknnrt.so found (looked in system paths and python packages)");
         return 1;
     }
-    char off_hex[32];
-    snprintf(off_hex, sizeof(off_hex), "0x%llx", offset);
-    rklog::info(std::string("symbol " SYM_NAME " -> file offset ") + off_hex);
 
     /* 2. 内嵌的 BPF 对象 */
     extern const unsigned char _binary_rkperf_bpf_o_start[];
@@ -182,22 +261,35 @@ static int do_trace(char **child_argv)
         fprintf(stderr, "execvp %s: %s\n", child_argv[0], strerror(errno));
         _exit(127);
     }
-    rklog::info("child pid=" + std::to_string(child));
 
-    /* 记录进程开始时刻 */
     const double t_start = mono_seconds();
     const std::string t_start_iso = iso_now();
     rklog::info("process start: pid=" + std::to_string(child) +
                 " at " + t_start_iso + " cmd=" + child_argv[0]);
 
-    /* 4. attach uprobe（只挂子进程） */
-    struct bpf_link *link_enter = bpf_program__attach_uprobe(prog_enter, false, child, LIB_PATH, offset);
-    struct bpf_link *link_exit  = bpf_program__attach_uprobe(prog_exit,  true,  child, LIB_PATH, offset);
-    if (!link_enter || !link_exit) {
-        rklog::error("attach uprobe failed: " + std::string(strerror(errno)));
+    /* 4. 每个库都挂一对探针（只挂子进程） */
+    std::vector<struct bpf_link *> links;
+    for (const auto &t : targets) {
+        struct bpf_link *le = bpf_program__attach_uprobe(prog_enter, false, child,
+                                                         t.path.c_str(), t.offset);
+        struct bpf_link *lx = bpf_program__attach_uprobe(prog_exit,  true,  child,
+                                                         t.path.c_str(), t.offset);
+        if (!le || !lx) {
+            rklog::warn("attach failed: " + t.path);
+            if (le) bpf_link__destroy(le);
+            if (lx) bpf_link__destroy(lx);
+            continue;
+        }
+        links.push_back(le);
+        links.push_back(lx);
+    }
+    if (links.empty()) {
+        rklog::error("attach uprobe failed on all targets");
         kill(child, SIGKILL);
+        waitpid(child, nullptr, 0);
         return 1;
     }
+    rklog::info("attached " + std::to_string(links.size() / 2) + " target(s)");
 
     /* 5. perf buffer */
     struct perf_buffer_opts pb_opts = {
@@ -219,19 +311,19 @@ static int do_trace(char **child_argv)
         if (err < 0 && err != -EINTR) { rklog::warn("poll: " + std::to_string(err)); break; }
         if (waitpid(child, &status, WNOHANG) == child) {
             child_done = true;
-            perf_buffer__poll(pb, 200);   /* 收完残余事件 */
+            perf_buffer__poll(pb, 200);
             break;
         }
     }
 
-    /* 7. 收尾：先 SIGTERM，最多等 2 秒，还不走就 SIGKILL */
+    /* 7. 收尾：SIGTERM -> 最多 2 秒 -> SIGKILL */
     if (!child_done) {
         kill(child, SIGTERM);
         for (int i = 0; i < 20; i++) {
             pid_t r = waitpid(child, &status, WNOHANG);
             if (r == child) { child_done = true; break; }
             if (r < 0 && errno == ECHILD) { child_done = true; break; }
-            usleep(100000);   /* 100 ms */
+            usleep(100000);
         }
         if (!child_done) {
             kill(child, SIGKILL);
@@ -257,8 +349,7 @@ static int do_trace(char **child_argv)
     rklog::info(summary);
 
     perf_buffer__free(pb);
-    bpf_link__destroy(link_enter);
-    bpf_link__destroy(link_exit);
+    for (auto *l : links) bpf_link__destroy(l);
     bpf_object__close(obj);
     return 0;
 }
@@ -272,7 +363,7 @@ int main(int argc, char **argv)
     if (!rklog::init(LOG_PATH, CSV_PATH))
         return 1;
 
-    rklog::info(std::string("rkperf start: target=") + argv[1] + " lib=" LIB_PATH);
+    rklog::info(std::string("rkperf start: target=") + argv[1]);
 
     int rc = do_trace(&argv[1]);
 

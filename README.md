@@ -27,16 +27,20 @@ sudo rkperf <程序> [程序参数...]
 例子：
 
 ```bash
+# C/C++ 程序
 sudo ~/rkperf/rkperf ~/yolo11_seg_demo/yolo11_seg_demo \
      ~/yolo11n-seg-4out.rknn ~/bus.jpg /tmp/o.jpg
+
+# Python SDK（rknn-toolkit-lite2 等）
+sudo ~/rkperf/rkperf python3 infer.py
 ```
 
 固定的东西（不用传参）：
 
 | 项 | 值 |
 |---|---|
-| 目标库 | `/usr/lib/librknnrt.so` |
 | 探针符号 | `rknn_run` |
+| 目标库 | **自动发现**：系统路径 + Python 包里自带的副本，找到几个挂几个 |
 | 日志 | `/tmp/rkperf.log` |
 | 数据 | `/tmp/rkperf.log.csv` |
 
