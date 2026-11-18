@@ -231,6 +231,7 @@ std::vector<probe_info>   g_probes;
 int         g_child = -1;
 
 std::vector<uint64_t> g_dur;      // 每次 rknn_run 的耗时（ns）
+std::vector<uint64_t> g_ts;       // 每次 rknn_run 的入口时刻（ns，算忙时并发用）
 uint64_t g_ev = 0;
 uint64_t g_sync = 0;
 uint64_t g_async = 0;
@@ -286,6 +287,15 @@ void snapshot_env()
                "ls -l /usr/lib/librknnrt.so /usr/local/lib/librknnrt.so "
                "/usr/lib/aarch64-linux-gnu/librknnrt.so 2>/dev/null; "
                "echo; ls -l /usr/lib/librknn_api/ 2>/dev/null");
+    capture_to(g_dir, "ddr.txt", "DDR 频点与调频策略",
+               "for d in /sys/class/devfreq/dmc /sys/class/devfreq/*dmc*; do "
+               "  [ -d \"$d\" ] || continue; echo \"--- $d\"; "
+               "  echo -n 'cur_freq: '; cat \"$d/cur_freq\" 2>/dev/null; "
+               "  echo -n 'governor: '; cat \"$d/governor\" 2>/dev/null; "
+               "  echo -n 'available: '; cat \"$d/available_frequencies\" 2>/dev/null; "
+               "done; "
+               "echo '--- dmc 相关 dmesg'; "
+               "dmesg 2>/dev/null | grep -i -E 'dmc|ddr' | tail -10");
 
     g_uname = trim(shell_capture("uname -srm"));
 }
@@ -433,10 +443,12 @@ void note_event(const rk_event &e)
     if (g_ev == 1 || e.dur_ns < g_min) g_min = e.dur_ns;
     if (e.dur_ns > g_max) g_max = e.dur_ns;
 
-    if (g_dur.size() < kMaxDurSamples)
+    if (g_dur.size() < kMaxDurSamples) {
         g_dur.push_back(e.dur_ns);
-    else
+        g_ts.push_back(e.ts_in);
+    } else {
         g_truncated = true;
+    }
 
     const uint32_t mask = e.core_mask & 0x7u;
     g_core_cnt[mask] += 1;
@@ -483,6 +495,7 @@ void finish(const rkrun::outcome &o)
 
     // 先把统计量拷出来，落盘期间不再占锁
     std::vector<uint64_t> dur;
+    std::vector<uint64_t> ts;
     std::vector<int> npu[3];
     std::vector<int> ddr_load;
     std::vector<unsigned long long> ddr_freq;
@@ -494,6 +507,7 @@ void finish(const rkrun::outcome &o)
     {
         std::lock_guard<std::mutex> lk(g_mu);
         dur = g_dur;
+        ts = g_ts;
         for (int i = 0; i < 3; ++i) npu[i] = g_npu[i];
         ddr_load = g_ddr_load;
         ddr_freq = g_ddr_freq;
@@ -511,6 +525,37 @@ void finish(const rkrun::outcome &o)
     const double p90_ns = pctl(sdur, 90.0);
     const double p99_ns = pctl(sdur, 99.0);
     const double conc = (o.duration_s > 0.0) ? (double)sum / (o.duration_s * 1e9) : 0.0;
+
+    // 忙时并发：把每次调用看成区间 [ts, ts+dur)，求并集。
+    // 分子分母都用同一批样本，所以和上面「全程并发度」口径可能略有差异（样本截断时）。
+    uint64_t busy_ns = 0, sum_stored = 0;
+    double conc_busy = 0.0, duty = 0.0;
+    if (!ts.empty() && ts.size() == dur.size()) {
+        std::vector<std::pair<uint64_t, uint64_t>> iv;
+        iv.reserve(ts.size());
+        for (size_t i = 0; i < ts.size(); ++i) {
+            iv.emplace_back(ts[i], ts[i] + dur[i]);
+            sum_stored += dur[i];
+        }
+        std::sort(iv.begin(), iv.end());
+
+        uint64_t cs = iv[0].first, ce = iv[0].second;
+        for (size_t i = 1; i < iv.size(); ++i) {
+            if (iv[i].first <= ce) {
+                if (iv[i].second > ce) ce = iv[i].second;
+            } else {
+                busy_ns += ce - cs;
+                cs = iv[i].first;
+                ce = iv[i].second;
+            }
+        }
+        busy_ns += ce - cs;
+
+        if (busy_ns > 0)
+            conc_busy = (double)sum_stored / (double)busy_ns;
+        if (o.duration_s > 0.0)
+            duty = 100.0 * (double)busy_ns / (o.duration_s * 1e9);
+    }
 
     // ---- NPU / DDR / 内存 的派生量 ----
     struct core_stat { double mean = 0, p90 = 0, mx = 0, ge90 = 0; size_t n = 0; };
@@ -600,7 +645,9 @@ void finish(const rkrun::outcome &o)
         md << "- 单次耗时：中位 **" << f3(med_ns / 1e6) << " ms**，P90 "
            << f3(p90_ns / 1e6) << " ms，P99 " << f3(p99_ns / 1e6)
            << " ms，最大 " << f3(vmax / 1e6) << " ms\n";
-        md << "- 平均并发度 **" << f2(conc) << "**（三核理论上限 3.00）\n";
+        md << "- 全程平均并发度 **" << f2(conc) << "**（Σ单次耗时 / 采集时长）\n";
+        md << "- 忙时平均并发度 **" << f2(conc_busy) << "**（Σ单次耗时 / 有任务在跑的时间），"
+           << "NPU 忙占比 " << p1(duty) << "\n";
     }
     if (!ddr_load.empty()) {
         md << "- DDR：均值 " << p1(ddr_mean) << "，P90 " << p1(ddr_p90)
@@ -629,14 +676,15 @@ void finish(const rkrun::outcome &o)
         md << "| P90 / P99 | " << f3(p90_ns / 1e6) << " / " << f3(p99_ns / 1e6) << " ms |\n";
         md << "| 最大 / 最小 | " << f3((double)vmax / 1e6) << " / "
            << f3((double)vmin / 1e6) << " ms |\n";
-        md << "| 平均并发度 | " << f2(conc) << " |\n\n";
+        md << "| 平均并发度（全程 / 忙时） | " << f2(conc) << " / " << f2(conc_busy) << " |\n";
+        md << "| NPU 忙占比 | " << p1(duty) << " |\n\n";
 
         md << "按核（`core_mask` 来自驱动回写，0 表示 auto/未知）：\n\n";
         md << "| core | 次数 | 占比 | 均值 |\n|---|---|---|---|\n";
         for (int i = 0; i < 8; ++i) {
             if (core_cnt[i] == 0)
                 continue;
-            md << "| " << (i == 0 ? "auto" : std::string("core") + std::to_string(i)) << " | "
+            md << "| " << core_mask_name((uint32_t)i) << " | "
                << core_cnt[i] << " | "
                << f2(100.0 * (double)core_cnt[i] / (double)ev) << "% | "
                << f3((double)core_sum[i] / (double)core_cnt[i] / 1e6) << " ms |\n";
@@ -726,6 +774,8 @@ void finish(const rkrun::outcome &o)
        << ", \"max_ms\": " << f3((double)vmax / 1e6)
        << ", \"min_ms\": " << f3((double)vmin / 1e6)
        << ", \"concurrency\": " << f2(conc)
+       << ", \"busy_concurrency\": " << f2(conc_busy)
+       << ", \"duty_cycle_pct\": " << f2(duty)
        << ", \"samples_truncated\": " << (truncated ? "true" : "false")
        << ", \"core_mask\": {";
     bool first_core = true;
@@ -734,7 +784,7 @@ void finish(const rkrun::outcome &o)
             continue;
         if (!first_core) js << ", ";
         first_core = false;
-        js << "\"" << (i == 0 ? "auto" : std::string("core") + std::to_string(i)) << "\": {\"count\": "
+        js << "\"" << core_mask_name((uint32_t)i) << "\": {\"count\": "
            << core_cnt[i] << ", \"mean_ms\": "
            << f3((double)core_sum[i] / (double)core_cnt[i] / 1e6) << "}";
     }

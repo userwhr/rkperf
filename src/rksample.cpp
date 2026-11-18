@@ -147,6 +147,7 @@ void Samplers::loop_mem(pid_t pid)
     char path[64];
     snprintf(path, sizeof(path), "/proc/%d/status", (int)pid);
 
+    const double t0 = mono_seconds();
     bool warned = false;
     while (!stop_.load()) {
         FILE *f = fopen(path, "r");
@@ -166,9 +167,13 @@ void Samplers::loop_mem(pid_t pid)
             }
             fclose(f);
             if (rss > 0 || threads > 0) {
-                rklog::write_mem((uint64_t)(mono_seconds() * 1e9), iso_now().c_str(),
-                                 rss, hwm, threads);
-                rksummary::note_mem(rss, hwm, threads);
+                // exec 之前采到的是 fork 副本（RSS 只有几 KB），不是目标进程，跳过
+                const bool early = (mono_seconds() - t0) < 2.0;
+                if (!(early && rss < 1024)) {
+                    rklog::write_mem((uint64_t)(mono_seconds() * 1e9), iso_now().c_str(),
+                                     rss, hwm, threads);
+                    rksummary::note_mem(rss, hwm, threads);
+                }
             }
         }
         for (int i = 0; i < 50 && !stop_.load(); i++)
