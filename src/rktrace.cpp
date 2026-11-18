@@ -40,6 +40,11 @@
 #include "rksummary.h"
 #include "rkutil.h"
 
+// 由 `ld -r -b binary` 生成的符号。
+// 必须声明在全局命名空间：放进匿名命名空间会变成内部链接，链接期找不到。
+extern const unsigned char _binary_rkperf_bpf_o_start[];
+extern const unsigned char _binary_rkperf_bpf_o_end[];
+
 namespace {
 
 using rkutil::hex_u64;
@@ -258,9 +263,7 @@ int do_trace(char **child_argv, rkrun::outcome *out)
         return 1;
     }
 
-    /* 2. 内嵌的 BPF 对象 */
-    extern const unsigned char _binary_rkperf_bpf_o_start[];
-    extern const unsigned char _binary_rkperf_bpf_o_end[];
+    /* 2. 内嵌的 BPF 对象（符号在文件顶部声明） */
     size_t bpf_sz = (size_t)(_binary_rkperf_bpf_o_end - _binary_rkperf_bpf_o_start);
 
     struct bpf_object *obj = bpf_object__open_mem(_binary_rkperf_bpf_o_start, bpf_sz, nullptr);
