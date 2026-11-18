@@ -2,6 +2,20 @@
 
 采集进程在 `rknn_run` 里的耗时（RK3588 + librknnrt）。
 
+## 代码结构
+
+| 文件 | 职责 |
+|---|---|
+| `src/rkperf.cpp` | `main`：命令行、建输出目录、调 rktrace、收尾 |
+| `src/rktrace.cpp` | 找 `librknnrt.so`、解析符号偏移、加载内嵌 BPF、fork/exec、挂探针、poll 收事件 |
+| `src/rksample.cpp` | NPU / DDR / 内存三个采样线程 |
+| `src/rklog.cpp` | 可读日志 + `events/npu/ddr/mem.csv` |
+| `src/rksummary.cpp` | `summary/`：环境快照、`config.json`、`OVERVIEW.md`、`stats.json` |
+| `src/rkperf.bpf.c` | BPF 探针本体（uprobe/uretprobe） |
+| `src/rk_event.h` | BPF 与用户态共享的事件结构，两边布局必须一致 |
+| `src/rkrun.h` | 一次采集的结果结构（rktrace 填，rksummary 用） |
+| `src/rkutil.h` | 时间戳、hex、输出目录等 inline 小工具 |
+
 ## 编译
 
 ```bash
@@ -107,13 +121,15 @@ sudo env HOME=/home/orangepi \
 ├── rkperf.log      可读日志
 ├── events.csv      每次 rknn_run 的数据
 ├── npu.csv         三个 NPU 核的使用率
-└── ddr.csv         DDR 带宽占用率
+├── ddr.csv         DDR 带宽占用率
+├── mem.csv         进程 VmRSS / VmHWM / 线程数
+└── summary/        环境快照 + 配置 + 总览（见下一节）
 ```
 
 **`rkperf.log`** — 可读日志
 
 ```
-[2026-11-15T20:45:19.024+08:00] [info] rkperf start: target=./infer_demo lib=/usr/lib/librknnrt.so
+[2026-11-15T20:45:19.024+08:00] [info] rkperf 0.2.0 start: target=./infer_demo
 [2026-11-15T20:45:19.025+08:00] [info] symbol rknn_run -> file offset 0xcc040
 [2026-11-15T20:45:19.100+08:00] [info] process start: pid=1234 at 2026-11-15T20:45:19.100+0800 cmd=./infer_demo
 [2026-11-15T20:45:19.150+08:00] [info] rknn_run pid=1234 tid=1234 ctx=0x7f8c SYNC  core=core0 dur=41.802 ms ret=0 comm=infer_demo
@@ -159,6 +175,68 @@ DMC 频率变化时会额外在主日志里记一条：
 ```
 [info] ddr freq: 528 MHz -> 2112 MHz (up)
 [info] ddr freq: 2112 MHz -> 528 MHz (down)
+```
+
+**`mem.csv`** — 进程内存，每 5 s 一行
+
+```
+# ts_ns,time,rss_kb,hwm_kb,threads
+26460869979302,2026-11-16T21:24:28.321+0800,182344,201488,12
+```
+
+数据来自 `/proc/<pid>/status` 的 `VmRSS` / `VmHWM` / `Threads`。
+注意 dma-buf / DMA heap 这类驱动侧内存不计入 `VmRSS`，所以这里看的是进程自身内存和线程数的趋势，
+不是"NPU 用了多少内存"。
+
+## summary/ —— 一次采集的自描述
+
+每次采集都会在输出目录下多写一个 `summary/`，对应 nxperf 的 `summary/`：
+**换个人、隔两周来看这份数据，也能知道当时是什么环境、怎么采的。**
+
+```
+summary/
+├── OVERVIEW.md          总览：调用次数、耗时分布、三核利用率、DDR、内存、环境
+├── stats.json           同一份统计的机器可读版（喂 pandas / 报告生成）
+├── config.json          本次怎么采的：目标、完整参数、探针地址、平台
+├── uname.txt            内核与主机
+├── lscpu.txt            CPU 拓扑与频率上限
+├── mount.txt / df.txt   挂载表与磁盘用量（找 NFS / IO 路径）
+├── net.txt              网卡与流量计数
+├── board.txt            os-release / kernel / cmdline / meminfo
+├── npu.txt              NPU 驱动、频点、dmesg
+├── libs.txt             实际挂上的 librknnrt.so
+└── proc/<pid>/          目标进程的 /proc 快照（status / smaps_rollup / limits / maps / tasks）
+```
+
+`OVERVIEW.md` 大致长这样（中间几节省略）：
+
+```markdown
+| 项 | 值 |
+|---|---|
+| 目标程序 | `./tile_yolo` |
+| 时长 | 12.300 s |
+| 退出 | exited，code 0 |
+| 平台 | Linux 5.10.160 aarch64 · rk |
+| 探针 | /usr/lib/librknnrt.so @0x10c40；/lib/aarch64-linux-gnu/libc.so.6 @0x84230 |
+
+- `rknn_run` **60** 次（SYNC 47 / ASYNC 13），失败 0 次
+- 单次耗时：中位 **41.802 ms**，P90 44.132 ms，P99 46.804 ms，最大 47.011 ms
+- 平均并发度 **0.20**（三核理论上限 3.00）
+- DDR：均值 35.0%，P90 61.0%，峰值 78.0%，主频点 2112.0 MHz
+- NPU core0：均值 45.0%，峰值 62.0%
+```
+
+采集完先看这一份，不用再翻三个 CSV 做心算。几个口径说明：
+
+- **平均并发度** = Σ`rknn_run` 耗时 / 采集时长。接近 3.00 说明三核在同时跑；0.2 说明大部分时间在等（预处理/后处理/IO）。
+- **NPU 利用率**来自驱动 `/sys/kernel/debug/rknpu/load`，统计窗口 1 s，所以是 1 s 平均值，不是瞬时值。
+- **DDR 均值频点**是采样期内的加权平均；下面还给了频点分布，调频策略的影响一眼能看出来。
+- 数据缺口会在对应小节写"无数据"并给原因（没 root / 节点不可读），不会静默留空。
+
+不想要 `summary/`：
+
+```bash
+sudo env RKPERF_NO_SUMMARY=1 ~/rkperf/rkperf ./your_demo
 ```
 
 ## 注意

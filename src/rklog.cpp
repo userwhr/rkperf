@@ -19,6 +19,7 @@ std::shared_ptr<spdlog::logger> g_log;   // 可读日志
 std::shared_ptr<spdlog::logger> g_csv;   // 采集事件
 std::shared_ptr<spdlog::logger> g_npu;   // NPU 使用率
 std::shared_ptr<spdlog::logger> g_ddr;   // DDR 带宽
+std::shared_ptr<spdlog::logger> g_mem;   // 进程内存
 
 std::shared_ptr<spdlog::logger> make_csv(const std::string &name, const std::string &path)
 {
@@ -39,7 +40,8 @@ namespace rklog {
 bool init(const std::string &log_path,
           const std::string &csv_path,
           const std::string &npu_path,
-          const std::string &ddr_path)
+          const std::string &ddr_path,
+          const std::string &mem_path)
 {
     try {
         spdlog::init_thread_pool(kQueueSize, 1);
@@ -65,6 +67,9 @@ bool init(const std::string &log_path,
 
         g_ddr = make_csv("ddr", ddr_path);
         g_ddr->info("# ts_ns,time,load_pct,freq_hz");
+
+        g_mem = make_csv("mem", mem_path);
+        g_mem->info("# ts_ns,time,rss_kb,hwm_kb,threads");
         return true;
     } catch (const spdlog::spdlog_ex &ex) {
         fprintf(stderr, "spdlog init failed: %s\n", ex.what());
@@ -109,6 +114,15 @@ void write_ddr(uint64_t ts_ns, const char *iso, int load_pct, unsigned long long
         g_ddr->log(spdlog::level::info, spdlog::string_view_t(buf, (size_t)n));
 }
 
+void write_mem(uint64_t ts_ns, const char *iso, long rss_kb, long hwm_kb, int threads)
+{
+    char buf[160];
+    int n = snprintf(buf, sizeof(buf), "%llu,%s,%ld,%ld,%d",
+                     (unsigned long long)ts_ns, iso, rss_kb, hwm_kb, threads);
+    if (n > 0)
+        g_mem->log(spdlog::level::info, spdlog::string_view_t(buf, (size_t)n));
+}
+
 void info(const std::string &msg)  { if (g_log) g_log->info(msg); }
 void warn(const std::string &msg)  { if (g_log) g_log->warn(msg); }
 void error(const std::string &msg) { if (g_log) g_log->error(msg); }
@@ -119,6 +133,7 @@ void flush()
     if (g_csv) g_csv->flush();
     if (g_npu) g_npu->flush();
     if (g_ddr) g_ddr->flush();
+    if (g_mem) g_mem->flush();
 }
 
 void shutdown() { spdlog::shutdown(); }
