@@ -20,6 +20,7 @@ SPDLOG_DIR="$BUILD/spdlog-$SPDLOG_VER"
 
 MODE=auto
 SYSROOT=${SYSROOT:-$HOME/aarch64-sysroot}
+DEPS=${DEPS:-}            # 可选：自备 aarch64 依赖根（include/bpf + lib/libbpf.a）
 CROSS_PREFIX=${CROSS_PREFIX:-aarch64-linux-gnu-}
 
 say()  { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
@@ -115,14 +116,32 @@ fetch_spdlog() {
 
 build_bpf() {
     command -v clang >/dev/null || die "缺少 clang（需要 -target bpf 支持）"
-    local arch_inc="/usr/include/$(uname -m)-linux-gnu"
-    [ -d "$arch_inc" ] || arch_inc="/usr/include"
+
+    # BPF 程序只用 UAPI 头（linux/bpf.h、asm/types.h …）。
+    # 交叉编译时要指到 aarch64 的 sysroot，否则会去翻宿主机的 x86 头。
+    local bpf_incs=()
+    if [ "$MODE" = cross ] && [ -d "$SYSROOT/usr/include" ]; then
+        bpf_incs+=("-I$SYSROOT/usr/include" "-I$SYSROOT/usr/include/aarch64-linux-gnu")
+    else
+        local arch_inc="/usr/include/$(uname -m)-linux-gnu"
+        [ -d "$arch_inc" ] || arch_inc="/usr/include"
+        bpf_incs+=("-I$arch_inc")
+    fi
+
     say "编译 BPF 程序"
     clang -O2 -g -target bpf -D__TARGET_ARCH_arm64 \
-          -I"$arch_inc" \
+          "${bpf_incs[@]}" \
           -c "$ROOT/src/rkperf.bpf.c" -o "$BUILD/rkperf.bpf.o"
+
+    # 交叉编译必须用交叉 ld 打 blob：宿主机 ld 产出的是 x86-64 目标文件，
+    # 链 aarch64 二进制时会报 "skipping incompatible bpf_blob.o"。
+    local ld_tool="ld"
+    if [ "$MODE" = cross ]; then
+        ld_tool="${CROSS_PREFIX}ld"
+        command -v "$ld_tool" >/dev/null || die "找不到 $ld_tool（交叉链接需要）"
+    fi
     # 必须在 build/ 里用相对文件名，否则 ld 会把路径编进符号名
-    ( cd "$BUILD" && ld -r -b binary rkperf.bpf.o -o bpf_blob.o )
+    ( cd "$BUILD" && "$ld_tool" -r -b binary rkperf.bpf.o -o bpf_blob.o )
 }
 
 link_native() {
@@ -142,6 +161,11 @@ link_cross() {
     [ -d "$SYSROOT/usr/include" ] || die "sysroot 不存在: $SYSROOT（先在板子上跑 --make-sysroot）"
 
     local extra=()
+    local deps_flags=()
+    if [ -n "$DEPS" ] && [ -d "$DEPS/include" ]; then
+        deps_flags+=("-I$DEPS/include")
+        [ -d "$DEPS/lib" ] && deps_flags+=("-L$DEPS/lib")
+    fi
     local gccdir
     gccdir=$(ls -d "$SYSROOT"/usr/lib/gcc/aarch64-linux-gnu/* 2>/dev/null | head -1 || true)
     [ -n "$gccdir" ] && extra+=("-L$gccdir")
@@ -151,6 +175,7 @@ link_cross() {
         -B"$SYSROOT/usr/lib/aarch64-linux-gnu" \
         -static -O2 -std=c++17 \
         -I"$SPDLOG_DIR/include" -I"$ROOT/src" \
+        "${deps_flags[@]}" \
         -I"$SYSROOT/usr/include" -I"$SYSROOT/usr/include/aarch64-linux-gnu" \
         "${extra[@]}" \
         "$ROOT/src/rkperf.cpp" "$ROOT/src/rktrace.cpp" "$ROOT/src/rksample.cpp" \
