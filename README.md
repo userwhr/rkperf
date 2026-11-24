@@ -10,6 +10,7 @@
 | `src/rktrace.cpp` | 找 `librknnrt.so`、解析符号偏移、加载内嵌 BPF、fork/exec、挂探针、poll 收事件 |
 | `src/rksample.cpp` | NPU / DDR / 内存三个采样线程 |
 | `src/rklog.cpp` | 可读日志 + `events/npu/ddr/mem.csv` |
+| `src/rkoplog.cpp` | `--op-time`：抓 runtime 的逐层算子表，写 `ops_report.txt` |
 | `src/rksummary.cpp` | `summary/`：环境快照、`config.json`、`OVERVIEW.md`、`stats.json` |
 | `src/rkperf.bpf.c` | BPF 探针本体（uprobe/uretprobe） |
 | `src/rk_event.h` | BPF 与用户态共享的事件结构，两边布局必须一致 |
@@ -79,6 +80,7 @@ scp build/rkperf rk:~/rkperf/
 
 ```bash
 sudo rkperf <程序> [程序参数...]
+sudo rkperf --op-time <程序> [程序参数...]     # 额外采集每个算子的耗时
 ```
 
 例子：
@@ -86,6 +88,9 @@ sudo rkperf <程序> [程序参数...]
 ```bash
 # C/C++ 程序
 sudo ~/rkperf/rkperf ./your_demo model.rknn input.jpg
+
+# 逐层算子耗时（多写一个 ops_report.txt）
+sudo ~/rkperf/rkperf --op-time ./your_demo model.rknn input.jpg
 
 # Python SDK（rknn-toolkit-lite2 等）
 sudo ~/rkperf/rkperf python3 your_script.py
@@ -123,8 +128,69 @@ sudo env HOME=/home/orangepi \
 ├── npu.csv         三个 NPU 核的使用率
 ├── ddr.csv         DDR 带宽占用率
 ├── mem.csv         进程 VmRSS / VmHWM / 线程数
+├── ops_report.txt  每帧的算子耗时报表 + 聚合排行（仅 --op-time）
 └── summary/        环境快照 + 配置 + 总览（见下一节）
 ```
+
+**`--op-time`：逐层算子耗时**
+
+打开后 rkperf 会给子进程设 `RKNN_LOG_LEVEL=4`，把它的 stdout 接到管道上——
+一边原样转发（被测程序自己的输出不会丢），一边解析 runtime 每次 `rknn_run`
+之后打的 `Network Layer Information Table`，把结果写进一个**纯文本报表**
+`ops_report.txt`：
+
+```
+# rkperf --op-time 逐层算子耗时
+# 数据来源：librknnrt 在 RKNN_LOG_LEVEL=4 时打印的 Network Layer Information Table（每个 rknn_run 一张）
+
+----------------------------------------------------------------------------------------------------
+ frame 1    125 ops    elapsed 54021 us    rw 78592 KB
+----------------------------------------------------------------------------------------------------
+ID   OpType         DataType Target InputShape                      OutputShape        Cycles(DDR/NPU/Total)  Time(us) MacUsage(%)      WorkLoad(0/1/2)     RW(KB)  FullName
+----------------------------------------------------------------------------------------------------
+1    InputOperator  INT8     CPU    \                               (1,3,640,640)      0/0/0                  15                       0.0%/0.0%/0.0%     0       InputOperator:images
+2    ConvExSwish    INT8     NPU    (1,3,640,640),(32,3,3,3),(32)   (1,32,320,320)     762676/921600/921600   1990     4.34/0.00/0.00   100.0%/0.0%/0.0%   1204    Conv:/model.0/conv/Conv
+...
+----------------------------------------------------------------------------------------------------
+Total Operator Elapsed Per Frame Time(us): 54021
+Total Memory Read/Write Per Frame Size(KB): 78592.00
+
+（第 2 帧、第 3 帧……同样的结构，逐帧追加）
+
+----------------------------------------------------------------------------------------------------
+      Operator Time Consuming Ranking (3 frames)
+----------------------------------------------------------------------------------------------------
+OpType             CallNumber   CPUTime(us)   GPUTime(us)   NPUTime(us)   TotalTime(us)  TimeRatio(%)
+----------------------------------------------------------------------------------------------------
+ConvExSwish        159          0.0           0.0           81654.0       81654.0        55.35
+Concat             42           0.0           0.0           14801.0       14801.0        10.03
+exSoftmax13        3            0.0           0.0           10451.0       10451.0        7.08
+...
+----------------------------------------------------------------------------------------------------
+Total                           307.0         0.0           147221.0      147528.0
+----------------------------------------------------------------------------------------------------
+```
+
+报表三块，和官方 `eval_perf` 对齐：
+
+- **每帧一张层表**：ID / OpType / DataType / Target / InputShape / OutputShape /
+  Cycles(DDR/NPU/Total) / Time(us) / MacUsage / WorkLoad / RW(KB) / FullName；
+- **每帧两行合计**：`Total Operator Elapsed`、`Total Memory Read/Write`；
+- **末尾一张排行表**：按 OpType 聚合，CPU/GPU/NPU 分开计时，带 `TimeRatio(%)`。
+
+`rkperf.log` 里还有一份摘要（帧数、每帧合计的中位/最大、top-8 算子）。
+
+几点要知道的：
+
+- 这些数字是 **runtime 自己报的**（硬件周期计数器换算），和我们外面量的 `rknn_run`
+  不是一回事：实测每帧层耗时合计约 47 ms，而 `rknn_run` 是 56 ms，差额是 117 次
+  提交之间的间隙和 fence 处理。
+- 开了这个模式，runtime 会**按层提交**（63 次/帧 → 117 次/帧），`rknn_run` 时间
+  会涨 8~11%，所以它适合看“哪层慢”，不适合拿来报端到端性能。
+- 报表是**逐帧追加**的：跑 20 帧就有 20 张表，文件比较大（每帧约 25 KB）。
+- 日志是逐行流转发的，崩溃时最后一帧可能不完整；表没抓到会在 `rkperf.log`
+  里写一条 warning。
+- 多线程并发跑 `rknn_run` 时，多张表可能交错，帧号按表的到达顺序编，不对应线程。
 
 **`rkperf.log`** — 可读日志
 

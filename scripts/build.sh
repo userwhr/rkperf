@@ -150,7 +150,8 @@ link_native() {
     g++ -O2 -std=c++17 \
         -I"$SPDLOG_DIR/include" -I"$ROOT/src" \
         "$ROOT/src/rkperf.cpp" "$ROOT/src/rktrace.cpp" "$ROOT/src/rksample.cpp" \
-        "$ROOT/src/rklog.cpp" "$ROOT/src/rksummary.cpp" "$BUILD/bpf_blob.o" \
+        "$ROOT/src/rklog.cpp" "$ROOT/src/rkoplog.cpp" "$ROOT/src/rksummary.cpp" \
+        "$BUILD/bpf_blob.o" \
         -lbpf -lelf -lz -lpthread \
         -o "$BUILD/rkperf"
 }
@@ -179,7 +180,8 @@ link_cross() {
         -I"$SYSROOT/usr/include" -I"$SYSROOT/usr/include/aarch64-linux-gnu" \
         "${extra[@]}" \
         "$ROOT/src/rkperf.cpp" "$ROOT/src/rktrace.cpp" "$ROOT/src/rksample.cpp" \
-        "$ROOT/src/rklog.cpp" "$ROOT/src/rksummary.cpp" "$BUILD/bpf_blob.o" \
+        "$ROOT/src/rklog.cpp" "$ROOT/src/rkoplog.cpp" "$ROOT/src/rksummary.cpp" \
+        "$BUILD/bpf_blob.o" \
         -L"$SYSROOT/usr/lib/aarch64-linux-gnu" \
         -lbpf -lelf -lz -lpthread -lm \
         -o "$BUILD/rkperf"

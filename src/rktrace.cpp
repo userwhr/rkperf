@@ -36,6 +36,7 @@
 
 #include "rk_event.h"
 #include "rklog.h"
+#include "rkoplog.h"
 #include "rksample.h"
 #include "rksummary.h"
 #include "rkutil.h"
@@ -245,7 +246,7 @@ void snapshot_after_exec(pid_t pid)
 
 /* ---------------- 主流程 ---------------- */
 
-int do_trace(char **child_argv, rkrun::outcome *out)
+int do_trace(char **child_argv, rkrun::outcome *out, const rktrace::options &opt)
 {
     /* 1. 找所有 librknnrt.so 并解析符号偏移 */
     std::vector<probe_target> targets;
@@ -292,11 +293,26 @@ int do_trace(char **child_argv, rkrun::outcome *out)
     if (!pb) { rklog::error("perf_buffer__new failed"); return 1; }
 
     /* 4. fork + exec：子进程先停住，等探针挂好再放行 */
+    const bool op_time = opt.op_time && rkoplog::enabled();
     pid_t child = fork();
     if (child < 0) { rklog::error("fork: " + std::string(strerror(errno))); return 1; }
     if (child == 0) {
         setpgid(0, 0);
         raise(SIGSTOP);            /* 等父进程 attach 完 */
+
+        /* --op-time：让 runtime 打逐层表（RKNN_LOG_LEVEL>=4 才有），
+           并把 stdout 接到采集管道上。这两件事都只影响子进程。 */
+        if (op_time) {
+            const char *lv = getenv("RKNN_LOG_LEVEL");
+            if (!lv || atoi(lv) < 4)
+                setenv("RKNN_LOG_LEVEL", "4", 1);
+            int w = rkoplog::child_fd();
+            if (w >= 0) {
+                dup2(w, STDOUT_FILENO);
+                close(w);
+            }
+        }
+
         execvp(child_argv[0], child_argv);
         fprintf(stderr, "execvp %s: %s\n", child_argv[0], strerror(errno));
         _exit(127);
@@ -305,6 +321,10 @@ int do_trace(char **child_argv, rkrun::outcome *out)
         int st = 0;
         waitpid(child, &st, WUNTRACED);   /* 等子进程真正停下来 */
     }
+
+    /* 4b. 读线程先起来：子进程一放行就会打 init 期的日志，不能晚 */
+    if (op_time)
+        rkoplog::start();
 
     /* 5. 每个库都挂探针（只挂子进程） */
     std::vector<struct bpf_link *> links;
@@ -340,6 +360,7 @@ int do_trace(char **child_argv, rkrun::outcome *out)
         rklog::error("attach uprobe failed on all targets");
         kill(child, SIGKILL);
         waitpid(child, nullptr, 0);
+        if (op_time) rkoplog::finish();
         return 1;
     }
 
@@ -452,6 +473,9 @@ int do_trace(char **child_argv, rkrun::outcome *out)
     perf_buffer__free(pb);
     for (auto *l : links) bpf_link__destroy(l);
     bpf_object__close(obj);
+
+    /* 12. 逐层算子耗时收尾（读线程要等子进程的 stdout 关掉） */
+    if (op_time) rkoplog::finish();
     return 0;
 }
 
@@ -459,9 +483,9 @@ int do_trace(char **child_argv, rkrun::outcome *out)
 
 namespace rktrace {
 
-int run(char **child_argv, rkrun::outcome *out)
+int run(char **child_argv, rkrun::outcome *out, const rktrace::options &opt)
 {
-    return do_trace(child_argv, out);
+    return do_trace(child_argv, out, opt);
 }
 
 }  // namespace rktrace
