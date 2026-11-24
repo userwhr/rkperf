@@ -36,8 +36,8 @@ void usage(const char *prog)
     fprintf(stderr,
             "usage: %s [--op-time] <program> [args...]\n\n"
             "  --op-time   打开 RKNN_LOG_LEVEL=4，采集每个 rknn 算子的耗时\n"
-            "              （写纯文本报表 ops_report.txt；会让提交粒度变细、\n"
-            "               run 时间 +8~11%%）\n"
+            "              （ops_report.txt 报表 + ops_report_folded.txt 火焰图数据；\n"
+            "               会让提交粒度变细、run 时间 +8~11%%）\n"
             "  -h, --help  显示这段帮助\n\n"
             "例: %s --op-time ./infer_demo model.rknn input.jpg\n",
             prog, prog);

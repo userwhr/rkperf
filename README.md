@@ -17,7 +17,7 @@
 | `src/rkrun.h` | 一次采集的结果结构（rktrace 填，rksummary 用） |
 | `src/rkutil.h` | 时间戳、hex、输出目录等 inline 小工具 |
 | `tools/rknn_names.py` | 直接扫 `.rknn` 出层名表（不用板子、不用 runtime） |
-| `tools/opsview.html` | `ops_report.txt` 的可视化（单文件、纯键盘操作） |
+| `tools/flamegraph.pl` | 官方火焰图脚本（CDDL-1.0），吃 `ops_report_folded.txt` |
 
 ## 编译
 
@@ -131,6 +131,7 @@ sudo env HOME=/home/orangepi \
 ├── ddr.csv         DDR 带宽占用率
 ├── mem.csv         进程 VmRSS / VmHWM / 线程数
 ├── ops_report.txt  每帧的算子耗时报表 + 聚合排行（仅 --op-time）
+├── ops_report_folded.txt  火焰图 collapsed stacks（仅 --op-time）
 └── summary/        环境快照 + 配置 + 总览（见下一节）
 ```
 
@@ -181,6 +182,29 @@ Total                           307.0         0.0           147221.0      147528
 - **末尾一张排行表**：按 OpType 聚合，CPU/GPU/NPU 分开计时，带 `TimeRatio(%)`。
 
 `rkperf.log` 里还有一份摘要（帧数、每帧合计的中位/最大、top-8 算子）。
+
+**`ops_report_folded.txt`：标准火焰图数据**
+
+同一批数据还会写成 Brendan Gregg 那套 **collapsed stacks**——每层一行，栈用 `;` 连接，
+空格后面是微秒数，重复的栈自动累加：
+
+```
+全部;model.22;cv3.0;cv3.0.0;conv;Conv 3502
+全部;model.22;dfl;Softmax;exSoftmax13 3383
+全部;model.0;conv;Conv 2073
+```
+
+层级来自层名里的模块路径（`Conv:/model.22/cv3.0/cv3.0.0/conv/Conv`），所以生成的火焰图
+天然就是“整个网络 → 某个 block → 某个子模块 → 某一层”的树。
+
+用仓库自带的官方脚本出图：
+
+```bash
+perl tools/flamegraph.pl --title "yolov8s" --countname us --width 1600 \
+     ops_report_folded.txt > flame.svg
+```
+
+生成的 `flame.svg` 浏览器直接打开：悬停看数值、点击下钻、`Ctrl-F` 搜索。
 
 几点要知道的：
 
@@ -307,37 +331,38 @@ summary/
 sudo env RKPERF_NO_SUMMARY=1 ~/rkperf/rkperf ./your_demo
 ```
 
-## 可视化：`tools/opsview.html`
+## 可视化：火焰图
 
-`--op-time` 的报表是纯文本，看数字还行，看趋势费劲。`tools/opsview.html` 是个**单文件可视化**：
-双击用浏览器打开，把 `ops_report.txt` 拖进去（或者用页面上的按钮选文件），不用装任何东西。
+`--op-time` 除了纯文本报表，还会写一份 `ops_report_folded.txt`——标准 collapsed stacks
+（`frame;frame;frame 数值`），直接喂给 Brendan Gregg 的 `flamegraph.pl` 就能出图。
+仓库里带了一份官方脚本 `tools/flamegraph.pl`（CDDL-1.0，来源见文件头），不用再下载。
 
-想省一步也可以放在同一目录下带参数打开：
+```bash
+# 板子上采完拷回 PC，然后：
+perl tools/flamegraph.pl --title "yolov8s-2out" --countname us --width 1600 \
+     ops_report_folded.txt > flame.svg
+```
+
+打开 `flame.svg`：悬停看每块的耗时和占比，**点击下钻**，`Ctrl-F` 搜索算子名。
+
+为什么这份数据能直接画火焰图：层级来自层名里的模块路径
 
 ```
-opsview.html?data=ops_report.txt
+Conv:/model.22/cv3.0/cv3.0.0/conv/Conv
+     └─────────┬──────────────┘
+全部;model.22;cv3.0;cv3.0.0;conv;Conv 3502
 ```
 
-四个视图，全靠键盘：
+所以图里天然是「整个网络 → 某个 block → 子模块 → 某一层」的形状，宽度就是耗时占比。
+多帧的栈会由 `flamegraph.pl` 自动累加；只看某一帧就切片（每帧层数固定）：
 
-| 键 | 作用 |
-|---|---|
-| `1` `2` `3` `4` | 帧时间线 / 算子明细 / 热力图 / 排行 |
-| `←` `→` | 平移帧窗口（视图 2 里是切层） |
-| `↑` `↓` | 选帧（视图 3/4 里是选算子） |
-| `+` `-` | 缩放帧窗口 |
-| `Home` `End` | 跳到首 / 末 |
-| `f` | 全览 |
-| `s` | 视图 2 切换「按耗时 / 按 ID」排序 |
-| `o` | 视图 3/4 选下一个算子 |
-| `r` | 全部重置 |
+```bash
+sed -n '251,375p' ops_report_folded.txt | \
+    perl tools/flamegraph.pl --countname us > frame3.svg
+```
 
-- **视图 1**：每帧 `rknn_run` 的层耗时合计，柱高 = 时长，虚线是中位数；选中的帧高亮。
-- **视图 2**：选中帧的逐层明细，按耗时排序，蓝色 NPU / 橙色 CPU，条上标层名。
-- **视图 3**：算子 × 帧 热力图——**颜色按行归一化**（同一行里比较），左边标该算子的峰值，所以一眼能看出"哪个算子在哪几帧变慢"。
-- **视图 4**：跨帧聚合排行，蓝/橙/绿分别是 NPU/CPU/GPU 的占比。
-
-> 依赖：只用到 Canvas 2D，Chrome/Edge/Firefox 都行；数据文件不离开本机。
+> 只用看数字的话不必出图：报表末尾已经有 `Operator Time Consuming Ranking`。
+> 环境里没有 perl 时，任何吃 collapsed stacks 的工具（inferno、speedscope 等）都能用这份数据。
 
 ## 注意
 

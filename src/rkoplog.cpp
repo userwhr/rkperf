@@ -45,7 +45,9 @@ namespace {
 int  g_rfd = -1;                  // 读端
 int  g_wfd = -1;                  // 写端（交给子进程）
 FILE *g_report = nullptr;         // ops_report.txt
+FILE *g_folded = nullptr;         // ops_folded.txt（火焰图 collapsed stacks）
 std::string g_report_path;
+std::string g_folded_path;
 std::thread g_reader;
 std::atomic<bool> g_stop{false};
 std::atomic<bool> g_eof{false};
@@ -262,6 +264,28 @@ const char *kRule =
     "----------------------------------------------------------------------------"
     "------------------------------------------------------------\n";
 
+// "Conv:/model.22/cv3.0/cv3.0.0/conv/Conv" -> "全部;model.22;cv3.0;cv3.0.0;conv;Conv"
+// 这就是火焰图的 collapsed stack 格式，层级来自层名里的模块路径。
+std::string folded_stack(const std::string &full)
+{
+    size_t i = full.find(':');
+    const std::string p = (i == std::string::npos) ? full : full.substr(i + 1);
+
+    std::string out = "全部";
+    size_t b = 0;
+    for (;;) {
+        size_t e = p.find('/', b);
+        std::string seg = p.substr(b, (e == std::string::npos ? p.size() : e) - b);
+        if (!seg.empty()) {
+            out += ';';
+            out += seg;
+        }
+        if (e == std::string::npos) break;
+        b = e + 1;
+    }
+    return out;
+}
+
 // 一帧结束：把这一帧的表写进报表，并累计统计
 void end_frame(frame_state &fs)
 {
@@ -294,6 +318,7 @@ void end_frame(frame_state &fs)
         fprintf(g_report, "Total Memory Read/Write Per Frame Size(KB): %.2f\n\n", (double)fa.rw_kb);
         fflush(g_report);
     }
+    if (g_folded) fflush(g_folded);
 }
 
 void on_row(const std::string &line, frame_state &fs)
@@ -310,6 +335,14 @@ void on_row(const std::string &line, frame_state &fs)
     fs.rows.push_back(r);
     fs.sum_us += r.time_us;
     fs.sum_rw += r.rw_kb;
+
+    if (g_folded) {
+        char val[32];
+        snprintf(val, sizeof(val), " %ld", (long)llround(r.time_us));
+        fputs(folded_stack(r.name).c_str(), g_folded);
+        fputs(val, g_folded);
+        fputc('\n', g_folded);
+    }
 
     op_agg &a = g_ops[r.op];
     a.calls++;
@@ -421,6 +454,18 @@ bool setup(const std::string &report_path)
         return false;
     }
     g_report_path = report_path;
+    {
+        // ops_report.txt -> ops_folded.txt
+        size_t dot = report_path.rfind('.');
+        g_folded_path = (dot == std::string::npos)
+                            ? report_path + "_folded.txt"
+                            : report_path.substr(0, dot) + "_folded.txt";
+    }
+
+    g_folded = fopen(g_folded_path.c_str(), "w");
+    if (!g_folded)
+        rklog::warn("op-time: open " + g_folded_path + " failed: " + strerror(errno));
+
     fprintf(g_report,
             "# rkperf --op-time 逐层算子耗时\n"
             "# 数据来源：librknnrt 在 RKNN_LOG_LEVEL=4 时打印的 "
@@ -462,10 +507,14 @@ void finish()
     const long frames = g_frames.load();
     if (frames == 0) {
         if (g_report) {
-            fprintf(g_report, "没有捕获到层表（RKNN_LOG_LEVEL 未生效？模型没跑？）\n");
-            fclose(g_report);
-            g_report = nullptr;
-        }
+        fprintf(g_report, "没有捕获到层表（RKNN_LOG_LEVEL 未生效？模型没跑？）\n");
+        fclose(g_report);
+        g_report = nullptr;
+    }
+    if (g_folded) {
+        fclose(g_folded);
+        g_folded = nullptr;
+    }
         rklog::warn("op-time: 没有捕获到层表（RKNN_LOG_LEVEL 未生效？模型没跑？）");
         return;
     }
@@ -521,6 +570,11 @@ void finish()
         fclose(g_report);
         g_report = nullptr;
     }
+    if (g_folded) {
+        fflush(g_folded);
+        fclose(g_folded);
+        g_folded = nullptr;
+    }
 
     for (size_t i = 0; i < rank.size() && i < 8; ++i) {
         const auto &kv = rank[i];
@@ -531,7 +585,9 @@ void finish()
                  kv.second.cpu_us, kv.second.npu_us);
         rklog::info(line);
     }
-    rklog::info("op-time: 报表 " + g_report_path);
+    rklog::info("op-time: 明细 " + g_report_path);
+    rklog::info("op-time: 火焰图数据 " + g_folded_path +
+                "（flamegraph.pl 或 tools/flamegen.py 可直接转 SVG）");
 }
 
 }  // namespace rkoplog
